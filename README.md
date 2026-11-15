@@ -1,6 +1,6 @@
 # Sekiro native Android development
 
-This Android Studio project builds an ARM64 NativeActivity with native Vulkan texture and static-mesh previews. The original Data5 texture has been displayed on an Android phone. The FLVER2 path has been tested with a host fixture. An original model, character animation and gameplay remain pending.
+The local ARM64 debug APK opens straight to a native Vulkan preview of the original Kusabimaru sword with its two base-color textures. The APK also contains the earlier Data5 texture preview. Character animation and gameplay are still in development.
 
 ## Build on Windows
 
@@ -11,7 +11,7 @@ $env:ANDROID_HOME = "$env:LOCALAPPDATA\Android\Sdk"
 .\gradlew.bat :app:assembleDebug
 ```
 
-The signed debug APK is at `app/build/outputs/apk/debug/app-debug.apk`. Gradle compiles and packages the texture and model shaders in `app/src/main/shaders`. [NDK setup](https://developer.android.com/studio/projects/install-ndk) · [Android shader compilers](https://developer.android.com/ndk/guides/graphics/shader-compilers)
+The signed debug APK is at `app/build/outputs/apk/debug/app-debug.apk`. Use the local asset build below to include the sword and textures. Gradle compiles and packages the texture and model shaders in `app/src/main/shaders`. [NDK setup](https://developer.android.com/studio/projects/install-ndk) · [Android shader compilers](https://developer.android.com/ndk/guides/graphics/shader-compilers)
 
 ### Vulkan validation
 
@@ -23,6 +23,26 @@ $validation = Resolve-Path .toolchain/vulkan-validation-1.4.341.0
 ```
 
 Debug builds log whether the Vulkan loader exposes the Khronos validation layer. When the loader provides `VK_EXT_debug_utils`, warning and error callbacks use the `SekiroVulkan` Logcat tag. [Android Vulkan validation](https://developer.android.com/ndk/guides/graphics/validation-layer)
+
+### Build with local Sekiro assets
+
+Stage only the preview assets from your own PC installation. Keep the APK local. The staging scripts open the installation for reading and write to the ignored generated directory. The player installs only the resulting APK.
+
+With Python 3.13 and the Windows [ooz 7.0 CLI](https://github.com/powzix/ooz/releases/tag/v7.0), install `cryptography`, `Pillow` and `soulstruct==2.6.0` in the host Python environment. Point `$keys` to the Sekiro PC archive-key directory in [Nuxe 1.2.1](https://github.com/JKAnderson/Nuxe/releases/tag/1.2.1). Soulstruct's host Oodle decoder is used for KRAK entries that ooz cannot decode. The APK contains the staged preview assets and Android code.
+
+```powershell
+$game = 'D:\gems\Sekiro.Shadows.Die.Twice.v1.06\Sekiro.Shadows.Die.Twice.v1.06'
+$keys = '.toolchain/nuxe-1.2.1/Nuxe 1.2.1/res/BinderKeys/Sekiro_PC/Key'
+$ooz = '.toolchain/ooz-7.0/64bit/ooz.exe'
+$out = 'reverse-engineering/reports/generated'
+New-Item -ItemType Directory -Force $out | Out-Null
+python tools/archive_probe.py $game --ooz $ooz --stage-samples > "$out/installation.json"
+python tools/bundle_kusabimaru.py $game --keys $keys --ooz $ooz `
+    --fallback "$out/inspection.tpf" --output "$out/apk-assets"
+if ($LASTEXITCODE -ne 0) { throw 'Could not stage local Sekiro assets' }
+$assets = (Resolve-Path "$out/apk-assets").Path
+.\gradlew.bat :app:assembleDebug "-PsekiroAssetsDir=$assets"
+```
 
 ## Reproduce the analysis
 
@@ -43,9 +63,9 @@ New-Item -ItemType Directory -Force $out | Out-Null
 python tools/archive_probe.py $game --ooz $ooz --stage-samples > "$out/installation.json"
 ```
 
-For archive metadata alone, use `python tools/archive_probe.py $game`. The probe opens installation files for reading. The APK packages the preview shaders and code. The game-derived `inspection.tpf` is a separate local file. It comes from Data5 BDT offset `0x3ef830` and has SHA-256 `342a3a19043f673cf4800eb002f5113ff916fd46e0444243861878791926d3bc`.
+For archive metadata alone, use `python tools/archive_probe.py $game`. The probe opens installation files for reading. The staged `inspection.tpf` comes from Data5 BDT offset `0x3ef830` and has SHA-256 `342a3a19043f673cf4800eb002f5113ff916fd46e0444243861878791926d3bc`.
 
-## Preview a local model
+## Optional asset inspection
 
 Press Android Back in the preview to open the asset menu. Choose **Open FLVER** and select a local little-endian Unicode Sekiro FLVER2 export. The importer also accepts the existing supported BND4 layout when it contains an uncompressed FLVER member. It previews indexed base-LOD geometry, positions, normals and UV0. The log reports the decoded model and the number of surfaces with a matching texture.
 
@@ -69,7 +89,7 @@ wsl.exe --exec "./$out/test_bnd4" "$out/inspection.bnd"
 wsl.exe --exec "./$out/test_tpf" "$out/inspection.tpf"
 ```
 
-The offscreen Vulkan test reads back the original Data5 texture and uses a labeled FLVER fixture to check indexed geometry, mesh depth, UV/material binding and the cutout-safe viewport. It uses the production C++ draw code and shaders extracted from the APK.
+The offscreen Vulkan test reads back the original Data5 texture, a labeled depth and UV fixture, and the actual bundled sword. It uses the production C++ draw code and shaders extracted from the local asset APK.
 
 ```powershell
 $out = 'reverse-engineering/reports/generated'
@@ -78,31 +98,29 @@ python -m zipfile -e 'app/build/outputs/apk/debug/app-debug.apk' $hostOut
 $headers = (wsl.exe --exec wslpath -a "$env:ANDROID_HOME/ndk/28.2.13676358/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/include").Trim()
 wsl.exe --exec g++ -std=c++20 -Wall -Wextra -Werror -Wno-missing-field-initializers `
     -I app/src/main/cpp -idirafter $headers app/src/main/cpp/assets/tpf.cpp app/src/main/cpp/assets/flver.cpp `
-    app/src/main/cpp/preview_texture.cpp app/src/main/cpp/mesh_preview.cpp `
+    app/src/main/cpp/assets/model_materials.cpp app/src/main/cpp/preview_texture.cpp app/src/main/cpp/mesh_preview.cpp `
     tests/test_vulkan_preview.cpp '-l:libvulkan.so.1' `
     -o "$hostOut/test_vulkan_preview"
 if ($LASTEXITCODE -ne 0) { throw 'Could not compile Vulkan host test' }
-wsl.exe --exec "$hostOut/test_vulkan_preview" "$out/inspection.tpf" `
+wsl.exe --exec "$hostOut/test_vulkan_preview" "$hostOut/assets/sekiro/preview.tpf" `
     "$hostOut/assets/shaders/preview.vert.spv" "$hostOut/assets/shaders/preview.frag.spv" `
-    "$hostOut/assets/shaders/model.vert.spv" "$hostOut/assets/shaders/model.frag.spv"
+    "$hostOut/assets/shaders/model.vert.spv" "$hostOut/assets/shaders/model.frag.spv" `
+    "$hostOut/assets/sekiro/model.flver" "$hostOut/assets/sekiro/materials.skmp"
 ```
 
 ## Android smoke test
 
-1. Update the APK and copy the staged `inspection.tpf` to the phone's Downloads folder.
-2. Launch the app, tap **Open TPF**, and select the sample. If the previous build already imported it, the update can reuse it. Expect a square texture centered within the landscape safe area. A square texture leaves side margins on a wider screen.
-3. Background and reopen the app. Rotate to the other landscape orientation and check that the texture stays visible. An edge swipe should reveal the system bars temporarily.
-
-In v0.3.1, Android Back shows **Sekiro asset preview · 0.3.1**. Choose **Retry fullscreen** if a bar remains visible after the preview opens.
+1. Install the APK built with local Sekiro assets and launch it. On a fresh install, the textured Kusabimaru sword appears in landscape without opening the file picker.
+2. Press Android Back to open the menu and choose **Show texture**. The original Data5 texture should appear centered with side margins. Use **Show model** from the same menu to return to the sword.
+3. Background and reopen the app. Rotate to the other landscape orientation and check that the preview stays visible. An edge swipe should reveal the system bars temporarily.
 
 ```powershell
-$adb = "$env:LOCALAPPDATA\Android\Sdk\platform-tools\adb.exe"
+$adb = "$env:LOCALAPPDATA\Android\Sdk\platform-toolsdb.exe"
 & $adb install -r 'app/build/outputs/apk/debug/app-debug.apk'
-& $adb push 'reverse-engineering/reports/generated/inspection.tpf' '/sdcard/Download/inspection.tpf'
 & $adb shell am start -n 'dev.sekiro.nativeport/.PreviewActivity'
 & $adb logcat -d -s SekiroNative SekiroVulkan
 ```
 
-Look for `Window insets: status visible=false, navigation visible=false`, `Loaded private inspection.tpf` and `Vulkan queued sampled texture frame`. For a local model, look for `FLVER geometry uploaded` and `Vulkan queued indexed FLVER frame`. A queue message records Vulkan accepting the presentation request. Check the phone screen for the visible result. [Android document picker](https://developer.android.com/training/data-storage/shared/documents-files) · [Immersive mode](https://developer.android.com/develop/ui/views/layout/immersive)
+Look for `Loaded bundled FLVER`, `3 matched textured surfaces`, and `Vulkan queued indexed FLVER frame`. Verify the visible result on the display. [Immersive mode](https://developer.android.com/develop/ui/views/layout/immersive)
 
 See [port progress](PORT_PROGRESS.md) and [the engine and archive evidence](reverse-engineering/reports/engine-evidence.md).

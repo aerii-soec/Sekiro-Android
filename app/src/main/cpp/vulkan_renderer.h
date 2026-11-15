@@ -19,7 +19,7 @@ public:
     ~VulkanRenderer();
 
     void initialize(ANativeWindow* window, AAssetManager* assets, const sekiro::assets::Texture* texture,
-                    const sekiro::assets::FlverModel* model, std::u16string_view textureStem);
+                    const sekiro::assets::FlverModel* model, std::span<const sekiro::assets::ModelTextureView> materials);
     void invalidateSwapchain() { needsSwapchain_ = true; }
     void setCutout(std::array<uint32_t, 4> insets) { cutout_ = insets; }
     bool draw();
@@ -38,7 +38,7 @@ private:
     ANativeWindow* window_ = nullptr;
     const sekiro::assets::Texture* texture_ = nullptr;
     const sekiro::assets::FlverModel* model_ = nullptr;
-    std::u16string_view textureStem_;
+    std::span<const sekiro::assets::ModelTextureView> materials_;
     std::unique_ptr<MeshPreview> mesh_;
     std::unique_ptr<DepthImage> depth_;
     AAssetManager* assets_ = nullptr;

@@ -326,6 +326,17 @@ public final class PreviewActivity extends NativeActivity {
 
     private static native String validateAsset(String path, boolean model);
 
+    private boolean hasPreviewAsset(String localName, String bundledName) {
+        if (new File(getFilesDir(), localName).isFile()) {
+            return true;
+        }
+        try (InputStream asset = getAssets().open("sekiro/" + bundledName)) {
+            return true;
+        } catch (IOException missing) {
+            return false;
+        }
+    }
+
     @Override
     @SuppressWarnings("deprecation")
     public void onBackPressed() {
@@ -334,8 +345,8 @@ public final class PreviewActivity extends NativeActivity {
         }
         File mode = new File(getFilesDir(), "texture-only");
         boolean textureOnly = mode.exists();
-        boolean canSwitch = new File(getFilesDir(), "inspection.flver").isFile() &&
-                            new File(getFilesDir(), "inspection.tpf").isFile();
+        boolean canSwitch = hasPreviewAsset("inspection.flver", "model.flver") &&
+                            hasPreviewAsset("inspection.tpf", "preview.tpf");
         AlertDialog.Builder menu = new AlertDialog.Builder(this)
                 .setTitle(MENU_TITLE)
                 .setPositiveButton("Open TPF", (dialog, which) -> chooseAsset(PICK_TEXTURE))

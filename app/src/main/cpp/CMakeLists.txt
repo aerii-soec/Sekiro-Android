@@ -4,6 +4,7 @@ project(sekiro_native LANGUAGES C CXX)
 add_library(sekiro_native SHARED
     assets/bnd4.cpp
     assets/flver.cpp
+    assets/model_materials.cpp
     assets/tpf.cpp
     main.cpp
     mesh_preview.cpp

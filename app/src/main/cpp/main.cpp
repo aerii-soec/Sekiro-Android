@@ -17,6 +17,7 @@
 
 namespace {
 constexpr char logTag[] = "SekiroNative";
+constexpr int64_t maxAssetBytes = 64 * 1024 * 1024;
 
 std::mutex windowInsetsMutex;
 std::array<uint32_t, 4> windowInsets{};
@@ -25,6 +26,8 @@ ALooper* insetLooper = nullptr;
 struct Application {
     std::optional<sekiro::assets::Texture> texture;
     std::u16string textureStem;
+    std::vector<sekiro::assets::ModelTexture> bundledTextures;
+    std::vector<sekiro::assets::ModelTextureView> materialViews;
     std::optional<sekiro::assets::FlverModel> model;
     std::unique_ptr<VulkanRenderer> renderer;
     bool resumed = false;
@@ -41,7 +44,6 @@ std::vector<uint8_t> readLocalAsset(const std::filesystem::path& path) {
     if (!input) {
         return {};
     }
-    constexpr std::streamoff maxAssetBytes = 64 * 1024 * 1024;
     const auto size = input.tellg();
     if (size <= 0 || size > maxAssetBytes) {
         throw std::runtime_error("Inspection asset exceeds size limits");
@@ -50,6 +52,28 @@ std::vector<uint8_t> readLocalAsset(const std::filesystem::path& path) {
     input.seekg(0);
     if (!input.read(reinterpret_cast<char*>(bytes.data()), size)) {
         throw std::runtime_error("Could not read inspection asset");
+    }
+    return bytes;
+}
+
+std::vector<uint8_t> readBundledAsset(AAssetManager* manager, const char* path) {
+    std::unique_ptr<AAsset, decltype(&AAsset_close)> asset(
+        AAssetManager_open(manager, path, AASSET_MODE_STREAMING), &AAsset_close);
+    if (!asset) {
+        return {};
+    }
+    const auto length = AAsset_getLength64(asset.get());
+    if (length <= 0 || length > maxAssetBytes) {
+        throw std::runtime_error(std::string("Bundled asset exceeds size limits: ") + path);
+    }
+    std::vector<uint8_t> bytes(static_cast<size_t>(length));
+    size_t offset = 0;
+    while (offset < bytes.size()) {
+        const auto count = AAsset_read(asset.get(), bytes.data() + offset, bytes.size() - offset);
+        if (count <= 0) {
+            throw std::runtime_error(std::string("Could not read bundled asset: ") + path);
+        }
+        offset += static_cast<size_t>(count);
     }
     return bytes;
 }
@@ -111,13 +135,30 @@ void loadInspectionAssets(ANativeActivity& activity, Application& state) {
     }
 
     std::string assetError;
+    bool bundledModel = false;
     try {
         if (!std::filesystem::exists(directory / "texture-only")) {
-            const auto bytes = readLocalAsset(directory / "inspection.flver");
+            auto bytes = readLocalAsset(directory / "inspection.flver");
+            if (bytes.empty()) {
+                bytes = readBundledAsset(activity.assetManager, "sekiro/model.flver");
+                bundledModel = !bytes.empty();
+            }
             if (!bytes.empty()) {
-                state.model = readPreviewModel(bytes);
-                __android_log_print(ANDROID_LOG_INFO, logTag, "Decoded FLVER (%zu bytes), %zu material records, %zu bones",
-                                    bytes.size(), state.model->materials.size(), state.model->bones.size());
+                auto model = readPreviewModel(bytes);
+                if (bundledModel) {
+                    const auto materials = readBundledAsset(activity.assetManager, "sekiro/materials.skmp");
+                    if (!materials.empty()) {
+                        state.bundledTextures = sekiro::assets::readModelMaterials(materials, model);
+                        for (const auto& texture : state.bundledTextures) {
+                            state.materialViews.push_back({texture.stem, &texture.image});
+                        }
+                    }
+                }
+                state.model = std::move(model);
+                __android_log_print(ANDROID_LOG_INFO, logTag,
+                    "Loaded %s FLVER (%zu bytes), %zu material records, %zu bones, %zu bundled textures",
+                    bundledModel ? "bundled" : "private", bytes.size(), state.model->materials.size(),
+                    state.model->bones.size(), state.bundledTextures.size());
             }
         }
     } catch (const std::exception& error) {
@@ -125,16 +166,27 @@ void loadInspectionAssets(ANativeActivity& activity, Application& state) {
         __android_log_write(ANDROID_LOG_ERROR, logTag, assetError.c_str());
     }
     try {
-        const auto bytes = readLocalAsset(directory / "inspection.tpf");
-        if (!bytes.empty()) {
-            state.texture = sekiro::assets::readTpfBc1(bytes);
-            state.textureStem = sekiro::assets::assetStem(sekiro::assets::tpfTextureName(bytes));
-            __android_log_print(ANDROID_LOG_INFO, logTag, "Loaded private inspection.tpf (%zu bytes); decoded %ux%u BC1 sRGB mip 0",
-                                bytes.size(), state.texture->width, state.texture->height);
+        // The bundled model already has its own original material set.
+        if (!state.model || !bundledModel) {
+            auto bytes = readLocalAsset(directory / "inspection.tpf");
+            const bool bundledTexture = bytes.empty();
+            if (bundledTexture) {
+                bytes = readBundledAsset(activity.assetManager, "sekiro/preview.tpf");
+            }
+            if (!bytes.empty()) {
+                state.texture = sekiro::assets::readTpfBc1(bytes);
+                state.textureStem = sekiro::assets::assetStem(sekiro::assets::tpfTextureName(bytes));
+                if (state.model && !state.textureStem.empty()) {
+                    state.materialViews.push_back({state.textureStem, &*state.texture});
+                }
+                __android_log_print(ANDROID_LOG_INFO, logTag, "Loaded %s TPF (%zu bytes); decoded %ux%u BC1 sRGB mip 0",
+                                    bundledTexture ? "bundled" : "private", bytes.size(),
+                                    state.texture->width, state.texture->height);
+            }
         }
     } catch (const std::exception& error) {
         if (assetError.empty()) {
-            assetError = std::string("Could not decode inspection.tpf. ") + error.what();
+            assetError = std::string("Could not decode the TPF. ") + error.what();
         }
         __android_log_print(ANDROID_LOG_ERROR, logTag, "TPF: %s", error.what());
     }
@@ -178,7 +230,7 @@ void onCommand(android_app* app, int32_t command) {
                                     ANativeWindow_getWidth(app->window), ANativeWindow_getHeight(app->window));
                 state.renderer->initialize(app->window, app->activity->assetManager,
                                            state.texture ? &*state.texture : nullptr,
-                                           state.model ? &*state.model : nullptr, state.textureStem);
+                                           state.model ? &*state.model : nullptr, state.materialViews);
                 state.renderer->setCutout(state.cutout);
                 state.redraw = true;
             }

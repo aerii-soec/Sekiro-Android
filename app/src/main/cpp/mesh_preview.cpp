@@ -110,19 +110,26 @@ DepthImage::~DepthImage() {
 
 void MeshPreview::initialize(VkPhysicalDevice physical, VkQueue queue, VkCommandBuffer commands,
                              VkRenderPass pass, const sekiro::assets::FlverModel& model,
-                             const sekiro::assets::Texture* texture, std::u16string_view textureStem,
+                             std::span<const sekiro::assets::ModelTextureView> textures,
                              bool srgb, std::span<const uint32_t> vert, std::span<const uint32_t> frag) {
     model_ = &model;
+    materialTextures_.resize(textures.size());
     for (const auto& surface : model.surfaces) {
-        const auto& material = model.materials[surface.material];
-        textured_.push_back(texture && !textureStem.empty() && surface.hasUv &&
-                            sekiro::assets::assetStem(material.diffuse) == textureStem);
+        const auto stem = sekiro::assets::assetStem(model.materials[surface.material].diffuse);
+        const auto match = std::ranges::find(textures, stem, &sekiro::assets::ModelTextureView::stem);
+        if (!surface.hasUv || stem.empty() || match == textures.end()) {
+            surfaceTextures_.push_back(std::nullopt);
+            continue;
+        }
+        const auto index = static_cast<size_t>(match - textures.begin());
+        if (!materialTextures_[index]) {
+            auto image = std::make_unique<PreviewTexture>(device_);
+            image->upload(physical, queue, commands, *match->image, srgb, true);
+            materialTextures_[index] = std::move(image);
+        }
+        surfaceTextures_.push_back(index);
     }
     fallback_.upload(physical, queue, commands, {1, 1, {230, 230, 230, 255}}, srgb);
-    if (texturedSurfaces()) {
-        materialTexture_ = std::make_unique<PreviewTexture>(device_);
-        materialTexture_->upload(physical, queue, commands, *texture, srgb, true);
-    }
     fallback_.createPipeline(pass, vert, frag, true);
     indexOffset_ = model.vertices.size() * sizeof(sekiro::assets::FlverVertex);
     const VkDeviceSize size = indexOffset_ + model.indices.size() * sizeof(uint32_t);
@@ -183,9 +190,10 @@ void MeshPreview::draw(VkCommandBuffer commands, VkRect2D area) const {
     const auto layout = fallback_.pipelineLayout();
     for (size_t i = 0; i < model_->surfaces.size(); ++i) {
         const auto& surface = model_->surfaces[i];
-        push.uvScale = textured_[i] ? model_->materials[surface.material].diffuseScale :
+        const auto image = surfaceTextures_[i];
+        push.uvScale = image ? model_->materials[surface.material].diffuseScale :
                                       std::array{1.0f, 1.0f};
-        const auto set = textured_[i] ? materialTexture_->descriptor() : fallback_.descriptor();
+        const auto set = image ? materialTextures_[*image]->descriptor() : fallback_.descriptor();
         vkCmdBindDescriptorSets(commands, VK_PIPELINE_BIND_POINT_GRAPHICS, layout, 0, 1, &set, 0, nullptr);
         vkCmdPushConstants(commands, layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(Push), &push);
         vkCmdDrawIndexed(commands, surface.indexCount, 1, surface.firstIndex, 0, 0);
@@ -193,7 +201,7 @@ void MeshPreview::draw(VkCommandBuffer commands, VkRect2D area) const {
 }
 
 size_t MeshPreview::texturedSurfaces() const {
-    return static_cast<size_t>(std::ranges::count(textured_, true));
+    return static_cast<size_t>(std::ranges::count_if(surfaceTextures_, [](const auto& item) { return item.has_value(); }));
 }
 
 MeshPreview::~MeshPreview() {

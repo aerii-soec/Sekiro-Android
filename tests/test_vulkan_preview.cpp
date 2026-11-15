@@ -295,8 +295,9 @@ void verifyMesh(std::span<const uint32_t> vertex, std::span<const uint32_t> frag
 
     MeshPreview preview(vulkan.device);
     const sekiro::assets::Texture red{1, 1, {255, 16, 8, 255}};
+    const std::array materials{sekiro::assets::ModelTextureView{u"previewalbedo", &red}};
     preview.initialize(vulkan.physical, vulkan.queue, vulkan.command, vulkan.pass,
-                       model, &red, u"previewalbedo", false, vertex, fragment);
+                       model, materials, false, vertex, fragment);
     require(preview.texturedSurfaces() == 1, "Imported material did not match exactly one FLVER surface");
     const auto pixels = vulkan.render(preview, extent, area);
     const auto center = 4 * ((area.offset.y + area.extent.height / 2) * extent.width +
@@ -319,17 +320,55 @@ void verifyMesh(std::span<const uint32_t> vertex, std::span<const uint32_t> frag
     std::cout << "FLVER fixture: two streams per mesh, strips, bones, material matching and cutout-safe "
                  "depth-tested rendering passed (" << rendered << " pixels)\n";
 }
+void verifyBundledMesh(const char* flver, const char* pack, std::span<const uint32_t> vertex,
+                       std::span<const uint32_t> fragment) {
+    auto model = sekiro::assets::readFlver2(read(flver));
+    const auto textures = sekiro::assets::readModelMaterials(read(pack), model);
+    require(model.vertices.size() == 4'984 && model.indices.size() == 5'866 * 3,
+            "Bundled Kusabimaru geometry counts changed");
+    require(textures.size() == 2, "Bundled Kusabimaru should have two color images");
+
+    std::vector<sekiro::assets::ModelTextureView> materials;
+    for (const auto& texture : textures) {
+        materials.push_back({texture.stem, &texture.image});
+    }
+    Vulkan vulkan;
+    vulkan.start();
+    const VkExtent2D extent{832, 480};
+    vulkan.createTarget(VK_FORMAT_R8G8B8A8_SRGB, extent, true);
+    MeshPreview preview(vulkan.device);
+    preview.initialize(vulkan.physical, vulkan.queue, vulkan.command, vulkan.pass,
+                       model, materials, true, vertex, fragment);
+    require(preview.texturedSurfaces() == 3, "Bundled Kusabimaru expected all three surfaces textured");
+    const auto pixels = vulkan.render(preview, extent, {{0, 0}, extent});
+    size_t visible = 0;
+    size_t colored = 0;
+    for (size_t i = 0; i < pixels.size(); i += 4) {
+        visible += std::max({pixels[i], pixels[i + 1], pixels[i + 2]}) > 0;
+        colored += std::max({pixels[i], pixels[i + 1], pixels[i + 2]}) -
+                   std::min({pixels[i], pixels[i + 1], pixels[i + 2]}) > 4;
+    }
+    require(visible > 1'000 && colored > 250, "Bundled sword failed the textured Vulkan readback");
+    std::cout << "Original Kusabimaru: 3 textured surfaces, " << visible
+              << " visible pixels, " << colored << " colored pixels\n";
+}
+
 }
 
 int main(int argc, char** argv) {
     try {
-        require(argc == 6, "Usage: test_vulkan_preview TEXTURE.TPF PREVIEW.VERT.SPV PREVIEW.FRAG.SPV MODEL.VERT.SPV MODEL.FRAG.SPV");
+        require(argc == 6 || argc == 8, "Usage: test_vulkan_preview TEXTURE.TPF PREVIEW.VERT.SPV PREVIEW.FRAG.SPV MODEL.VERT.SPV MODEL.FRAG.SPV [MODEL.FLVER MATERIALS.SKMP]");
         const auto texture = sekiro::assets::readTpfBc1(read(argv[1]));
         const auto vertex = shader(argv[2]);
         const auto fragment = shader(argv[3]);
         verify(texture, vertex, fragment, false);
         verify(texture, vertex, fragment, true);
-        verifyMesh(shader(argv[4]), shader(argv[5]));
+        const auto modelVertex = shader(argv[4]);
+        const auto modelFragment = shader(argv[5]);
+        verifyMesh(modelVertex, modelFragment);
+        if (argc == 8) {
+            verifyBundledMesh(argv[6], argv[7], modelVertex, modelFragment);
+        }
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
         return 1;

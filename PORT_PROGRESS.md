@@ -1,5 +1,13 @@
 # Port progress
 
+## Single-APK original model preview
+
+- v0.4.0 starts on the original Kusabimaru weapon model in landscape. The signed ARM64 APK includes the FLVER, its two base-color images and the previously verified Data5 TPF. The previous file import actions remain available in the Android Back menu for asset inspection.
+- The model came from `Data2` at `/parts/wp_a_0300.partsbnd.dcx`. Its three base-color bindings came from the original MTD binder in `Data1`. The 4,984 vertices and 5,866 triangles are unchanged from the base-LOD FLVER. Host staging decoded the BC7 and BC1 sRGB images. The Vulkan preview uses primary UVs and simple directional lighting. The original game shaders, normal maps and material effects remain pending.
+- A clean Android 15 x86-64 emulator install showed the textured sword in native Vulkan at 2400×1080 with both system bars hidden. The menu switched to the bundled Data5 texture and back to the sword. The host Vulkan test read back both previews with Khronos validation and logged no errors or warnings. All four Python tests passed.
+- The ARM64 APK passed Android signature and 16 KiB ZIP alignment checks. All three packaged assets matched the staged bytes. A physical ARM64 phone was unavailable for v0.4.0 runtime verification.
+- Only the selected preview assets are staged. The Android game engine, playable world, player controls, animation and combat remain in development. The original installation was opened read-only.
+
 ## Fullscreen follow-up
 
 - v0.3.1 requests fullscreen after the activity window attaches, regains focus, or receives control of the system bars. It checks the reported visibility once and retries with compatibility flags if needed. Android Back opens a versioned asset menu with **Retry fullscreen**.
@@ -43,8 +51,8 @@ The phone test of `cbdb888` confirmed installation, startup and a solid blue-gra
 
 ## Next engineering tasks
 
-1. On Vulkan-capable ARM64 hardware, verify that v0.3.0 hides both bars and that the Data5 texture stays aspect-correct after rotation, system gestures and backgrounding. Use the [smoke test instructions](README.md#android-smoke-test).
+1. On Vulkan-capable ARM64 hardware, verify v0.4.0 starts at the sword and that both bundled previews remain visible after rotation and backgrounding. Use the [smoke test instructions](README.md#android-smoke-test).
 2. Compare an authorized clean Steam 1.06 executable with the recorded Ghidra input before treating engine behavior as stock. Trace the archive object initialization at `0x141de3d10` and its registration at `0x141a075d0`.
-3. Import an authorized original FLVER2 export and its matching texture. Verify geometry, UV mapping, orientation and scale against a reference viewer, then validate the matching character skeleton and idle clip.
+3. Assemble Wolf's character model from the equipment-part binders and its matching `c0000` skeleton and idle clip. The recovered `c0000.flver` in Data3 contains the base rig and has no renderable base LOD. Validate the assembled character's geometry, UV mapping, orientation and scale against a reference viewer before adding skinning.
 
-The debug APK is at `app/build/outputs/apk/debug/app-debug.apk`. Generated local evidence and staged samples are under `reverse-engineering/reports/generated`.
+The local v0.4.0 ARM64 APK is at `app/build/outputs/apk/debug/sekiro-local-v0.4.0-arm64-debug.apk`. Generated local evidence and staged samples are under `reverse-engineering/reports/generated`.

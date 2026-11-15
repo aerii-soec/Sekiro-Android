@@ -52,9 +52,9 @@ bool rebuildNeeded(VkResult result) {
 
 void VulkanRenderer::initialize(ANativeWindow* window, AAssetManager* assets,
                                 const sekiro::assets::Texture* texture,
-                                const sekiro::assets::FlverModel* model, std::u16string_view textureStem) {
+                                const sekiro::assets::FlverModel* model, std::span<const sekiro::assets::ModelTextureView> materials) {
     model_ = model;
-    textureStem_ = textureStem;
+    materials_ = materials;
     window_ = window;
     assets_ = assets;
     texture_ = texture;
@@ -371,7 +371,7 @@ bool VulkanRenderer::createSwapchain() {
         const auto frag = readShader(assets_, "shaders/model.frag.spv");
         mesh_ = std::make_unique<MeshPreview>(device_);
         mesh_->initialize(physicalDevice_, queue_, commandBuffer_, renderPass_, *model_,
-                          texture_, textureStem_, srgb, vert, frag);
+                          materials_, srgb, vert, frag);
         __android_log_print(ANDROID_LOG_INFO, logTag,
             "FLVER geometry uploaded: %zu vertices, %zu triangles, %zu surfaces, %zu matched textured surfaces",
             model_->vertices.size(), model_->indices.size() / 3, model_->surfaces.size(), mesh_->texturedSurfaces());
