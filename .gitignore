@@ -1,0 +1,7 @@
+.gradle/
+.toolchain/
+local.properties
+**/.cxx/
+**/build/
+__pycache__/
+reverse-engineering/reports/generated/
