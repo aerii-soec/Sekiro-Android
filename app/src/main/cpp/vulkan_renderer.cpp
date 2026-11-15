@@ -1,4 +1,5 @@
 #include "vulkan_renderer.h"
+#include "viewport.h"
 
 #include <android/log.h>
 
@@ -50,7 +51,10 @@ bool rebuildNeeded(VkResult result) {
 }
 
 void VulkanRenderer::initialize(ANativeWindow* window, AAssetManager* assets,
-                                const sekiro::assets::Texture* texture) {
+                                const sekiro::assets::Texture* texture,
+                                const sekiro::assets::FlverModel* model, std::u16string_view textureStem) {
+    model_ = model;
+    textureStem_ = textureStem;
     window_ = window;
     assets_ = assets;
     texture_ = texture;
@@ -234,10 +238,10 @@ bool VulkanRenderer::createSwapchain() {
     check(vkGetPhysicalDeviceSurfaceFormatsKHR(physicalDevice_, surface_, &formatCount, formats.data()),
           "vkGetPhysicalDeviceSurfaceFormatsKHR");
     formats.resize(formatCount);
-    const auto srgb = std::find_if(formats.begin(), formats.end(), [](const auto& candidate) {
+    const auto preferredFormat = std::find_if(formats.begin(), formats.end(), [](const auto& candidate) {
         return candidate.format == VK_FORMAT_R8G8B8A8_SRGB || candidate.format == VK_FORMAT_B8G8R8A8_SRGB;
     });
-    VkSurfaceFormatKHR format = srgb == formats.end() ? formats.front() : *srgb;
+    VkSurfaceFormatKHR format = preferredFormat == formats.end() ? formats.front() : *preferredFormat;
     if (format.format == VK_FORMAT_UNDEFINED) {
         format.format = VK_FORMAT_R8G8B8A8_UNORM;
     }
@@ -293,10 +297,21 @@ bool VulkanRenderer::createSwapchain() {
     color.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     color.finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
     const VkAttachmentReference attachment{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+    const VkAttachmentReference depthAttachment{1, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
+    std::array<VkAttachmentDescription, 2> attachments{color, {}};
+    if (model_) {
+        depth_ = std::make_unique<DepthImage>(device_);
+        depth_->create(physicalDevice_, extent_);
+        attachments[1] = {0, depth_->format(), VK_SAMPLE_COUNT_1_BIT, VK_ATTACHMENT_LOAD_OP_CLEAR,
+            VK_ATTACHMENT_STORE_OP_DONT_CARE, VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+            VK_ATTACHMENT_STORE_OP_DONT_CARE, VK_IMAGE_LAYOUT_UNDEFINED,
+            VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
+    }
     VkSubpassDescription subpass{};
     subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
     subpass.colorAttachmentCount = 1;
     subpass.pColorAttachments = &attachment;
+    subpass.pDepthStencilAttachment = depth_ ? &depthAttachment : nullptr;
 
     VkSubpassDependency dependency{};
     dependency.srcSubpass = VK_SUBPASS_EXTERNAL;
@@ -304,10 +319,19 @@ bool VulkanRenderer::createSwapchain() {
     dependency.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
     dependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
     dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    if (depth_) {
+        constexpr auto depthTests = VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT |
+                                    VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+        dependency.srcStageMask |= depthTests;
+        dependency.dstStageMask |= depthTests;
+        dependency.srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+        dependency.dstAccessMask |= VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT |
+                                    VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT;
+    }
 
     VkRenderPassCreateInfo renderPassInfo{VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO};
-    renderPassInfo.attachmentCount = 1;
-    renderPassInfo.pAttachments = &color;
+    renderPassInfo.attachmentCount = depth_ ? 2 : 1;
+    renderPassInfo.pAttachments = attachments.data();
     renderPassInfo.subpassCount = 1;
     renderPassInfo.pSubpasses = &subpass;
     renderPassInfo.dependencyCount = 1;
@@ -329,8 +353,9 @@ bool VulkanRenderer::createSwapchain() {
 
         VkFramebufferCreateInfo framebufferInfo{VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
         framebufferInfo.renderPass = renderPass_;
-        framebufferInfo.attachmentCount = 1;
-        framebufferInfo.pAttachments = &frame.view;
+        const std::array views{frame.view, depth_ ? depth_->view() : VK_NULL_HANDLE};
+        framebufferInfo.attachmentCount = depth_ ? 2 : 1;
+        framebufferInfo.pAttachments = views.data();
         framebufferInfo.width = extent_.width;
         framebufferInfo.height = extent_.height;
         framebufferInfo.layers = 1;
@@ -339,11 +364,20 @@ bool VulkanRenderer::createSwapchain() {
         const VkSemaphoreCreateInfo semaphoreInfo{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
         check(vkCreateSemaphore(device_, &semaphoreInfo, nullptr, &frame.rendered), "vkCreateSemaphore");
     }
-    if (texture_) {
+    const bool srgb = format.format == VK_FORMAT_R8G8B8A8_SRGB || format.format == VK_FORMAT_B8G8R8A8_SRGB ||
+                      format.format == VK_FORMAT_A8B8G8R8_SRGB_PACK32;
+    if (model_) {
+        const auto vert = readShader(assets_, "shaders/model.vert.spv");
+        const auto frag = readShader(assets_, "shaders/model.frag.spv");
+        mesh_ = std::make_unique<MeshPreview>(device_);
+        mesh_->initialize(physicalDevice_, queue_, commandBuffer_, renderPass_, *model_,
+                          texture_, textureStem_, srgb, vert, frag);
+        __android_log_print(ANDROID_LOG_INFO, logTag,
+            "FLVER geometry uploaded: %zu vertices, %zu triangles, %zu surfaces, %zu matched textured surfaces",
+            model_->vertices.size(), model_->indices.size() / 3, model_->surfaces.size(), mesh_->texturedSurfaces());
+    } else if (texture_) {
         const auto vert = readShader(assets_, "shaders/preview.vert.spv");
         const auto frag = readShader(assets_, "shaders/preview.frag.spv");
-        const bool srgb = format.format == VK_FORMAT_R8G8B8A8_SRGB || format.format == VK_FORMAT_B8G8R8A8_SRGB ||
-                          format.format == VK_FORMAT_A8B8G8R8_SRGB_PACK32;
         preview_ = std::make_unique<PreviewTexture>(device_);
         preview_->upload(physicalDevice_, queue_, commandBuffer_, *texture_, srgb);
         __android_log_print(ANDROID_LOG_INFO, logTag, "Uploaded %ux%u RGBA texture (%zu bytes) to Vulkan image",
@@ -392,16 +426,21 @@ bool VulkanRenderer::draw() {
     VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     check(vkBeginCommandBuffer(commandBuffer_, &begin), "vkBeginCommandBuffer");
-    constexpr VkClearValue clear{{{0.015f, 0.015f, 0.015f, 1.0f}}};
+    std::array<VkClearValue, 2> clear{};
+    clear[0].color = {{0.015f, 0.015f, 0.015f, 1.0f}};
+    clear[1].depthStencil = {1.0f, 0};
     VkRenderPassBeginInfo pass{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
     pass.renderPass = renderPass_;
     pass.framebuffer = frame.framebuffer;
     pass.renderArea.extent = extent_;
-    pass.clearValueCount = 1;
-    pass.pClearValues = &clear;
+    pass.clearValueCount = depth_ ? 2 : 1;
+    pass.pClearValues = clear.data();
     vkCmdBeginRenderPass(commandBuffer_, &pass, VK_SUBPASS_CONTENTS_INLINE);
-    if (preview_) {
-        preview_->draw(commandBuffer_, extent_);
+    const auto area = safeViewport(extent_, cutout_);
+    if (mesh_) {
+        mesh_->draw(commandBuffer_, area);
+    } else if (preview_) {
+        preview_->draw(commandBuffer_, area);
     }
     vkCmdEndRenderPass(commandBuffer_);
     check(vkEndCommandBuffer(commandBuffer_), "vkEndCommandBuffer (preview frame)");
@@ -435,7 +474,7 @@ bool VulkanRenderer::draw() {
     }
     if (!loggedPresent_ && presented != VK_ERROR_OUT_OF_DATE_KHR) {
         __android_log_print(ANDROID_LOG_INFO, logTag, "Vulkan queued %s frame at %ux%u (image=%u VkResult=%d)",
-                            preview_ ? "sampled texture" : "clear-only", extent_.width, extent_.height,
+                            mesh_ ? "indexed FLVER" : preview_ ? "sampled texture" : "clear-only", extent_.width, extent_.height,
                             image, presented);
         loggedPresent_ = true;
     }
@@ -444,6 +483,7 @@ bool VulkanRenderer::draw() {
 
 void VulkanRenderer::destroySwapchain() {
     loggedPresent_ = false;
+    mesh_.reset();
     preview_.reset();
     for (const auto& frame : frames_) {
         vkDestroySemaphore(device_, frame.rendered, nullptr);
@@ -451,6 +491,7 @@ void VulkanRenderer::destroySwapchain() {
         vkDestroyImageView(device_, frame.view, nullptr);
     }
     frames_.clear();
+    depth_.reset();
     vkDestroyRenderPass(device_, renderPass_, nullptr);
     renderPass_ = VK_NULL_HANDLE;
     vkDestroySwapchainKHR(device_, swapchain_, nullptr);

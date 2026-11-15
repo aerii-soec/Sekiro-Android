@@ -1,4 +1,6 @@
-#include "preview_texture.h"
+#include "flver_fixture.h"
+#include "mesh_preview.h"
+#include "viewport.h"
 
 #include <algorithm>
 #include <array>
@@ -46,6 +48,7 @@ struct Vulkan {
     VkCommandPool commands = VK_NULL_HANDLE;
     VkCommandBuffer command = VK_NULL_HANDLE;
     VkRenderPass pass = VK_NULL_HANDLE;
+    std::unique_ptr<DepthImage> depth;
     VkImage output = VK_NULL_HANDLE;
     VkDeviceMemory outputMemory = VK_NULL_HANDLE;
     VkImageView view = VK_NULL_HANDLE;
@@ -59,6 +62,7 @@ struct Vulkan {
             vkDestroyBuffer(device, readback, nullptr);
             vkFreeMemory(device, readbackMemory, nullptr);
             vkDestroyFramebuffer(device, framebuffer, nullptr);
+            depth.reset();
             vkDestroyImageView(device, view, nullptr);
             vkDestroyImage(device, output, nullptr);
             vkFreeMemory(device, outputMemory, nullptr);
@@ -127,7 +131,7 @@ struct Vulkan {
         throw std::runtime_error("No host Vulkan test memory type");
     }
 
-    void createTarget(VkFormat format, VkExtent2D extent) {
+    void createTarget(VkFormat format, VkExtent2D extent, bool withDepth = false) {
         VkImageCreateInfo imageInfo{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
         imageInfo.imageType = VK_IMAGE_TYPE_2D;
         imageInfo.format = format;
@@ -154,17 +158,29 @@ struct Vulkan {
                                              VK_ATTACHMENT_STORE_OP_DONT_CARE, VK_IMAGE_LAYOUT_UNDEFINED,
                                              VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL};
         const VkAttachmentReference target{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+        const VkAttachmentReference depthTarget{1, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
+        std::array<VkAttachmentDescription, 2> attachments{color, {}};
+        if (withDepth) {
+            depth = std::make_unique<DepthImage>(device);
+            depth->create(physical, extent);
+            attachments[1] = {0, depth->format(), VK_SAMPLE_COUNT_1_BIT, VK_ATTACHMENT_LOAD_OP_CLEAR,
+                VK_ATTACHMENT_STORE_OP_DONT_CARE, VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+                VK_ATTACHMENT_STORE_OP_DONT_CARE, VK_IMAGE_LAYOUT_UNDEFINED,
+                VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
+        }
         VkSubpassDescription subpass{};
         subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
         subpass.colorAttachmentCount = 1;
         subpass.pColorAttachments = &target;
+        subpass.pDepthStencilAttachment = depth ? &depthTarget : nullptr;
         const VkSubpassDependency dependency{0, VK_SUBPASS_EXTERNAL, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
             VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT, 0};
         const VkRenderPassCreateInfo passInfo{VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO, nullptr, 0,
-                                               1, &color, 1, &subpass, 1, &dependency};
+                                               depth ? 2u : 1u, attachments.data(), 1, &subpass, 1, &dependency};
         vkCheck(vkCreateRenderPass(device, &passInfo, nullptr, &pass), "vkCreateRenderPass");
+        const std::array views{view, depth ? depth->view() : VK_NULL_HANDLE};
         const VkFramebufferCreateInfo framebufferInfo{VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO, nullptr,
-            0, pass, 1, &view, extent.width, extent.height, 1};
+            0, pass, depth ? 2u : 1u, views.data(), extent.width, extent.height, 1};
         vkCheck(vkCreateFramebuffer(device, &framebufferInfo, nullptr, &framebuffer), "vkCreateFramebuffer");
 
         VkBufferCreateInfo buffer{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
@@ -177,15 +193,17 @@ struct Vulkan {
         vkCheck(vkBindBufferMemory(device, readback, readbackMemory, 0), "vkBindBufferMemory");
     }
 
-    std::vector<uint8_t> render(const PreviewTexture& preview, VkExtent2D extent) const {
+    std::vector<uint8_t> render(const auto& preview, VkExtent2D extent, VkRect2D area) const {
         vkCheck(vkResetCommandBuffer(command, 0), "vkResetCommandBuffer");
         const VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
         vkCheck(vkBeginCommandBuffer(command, &begin), "vkBeginCommandBuffer");
-        constexpr VkClearValue clear{{{0.0f, 0.0f, 0.0f, 1.0f}}};
+        std::array<VkClearValue, 2> clear{};
+        clear[0].color = {{0.0f, 0.0f, 0.0f, 1.0f}};
+        clear[1].depthStencil = {1.0f, 0};
         const VkRenderPassBeginInfo draw{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO, nullptr, pass,
-                                         framebuffer, {{0, 0}, extent}, 1, &clear};
+                                         framebuffer, {{0, 0}, extent}, depth ? 2u : 1u, clear.data()};
         vkCmdBeginRenderPass(command, &draw, VK_SUBPASS_CONTENTS_INLINE);
-        preview.draw(command, extent);
+        preview.draw(command, area);
         vkCmdEndRenderPass(command);
         VkBufferImageCopy copy{};
         copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
@@ -216,7 +234,7 @@ void verify(const sekiro::assets::Texture& input, std::span<const uint32_t> vert
     PreviewTexture preview(vulkan.device);
     preview.upload(vulkan.physical, vulkan.queue, vulkan.command, input, srgb);
     preview.createPipeline(vulkan.pass, vertex, fragment);
-    const auto output = vulkan.render(preview, extent);
+    const auto output = vulkan.render(preview, extent, {{0, 0}, extent});
 
     const uint32_t left = input.width / 2;
     size_t colored = 0;
@@ -242,16 +260,76 @@ void verify(const sekiro::assets::Texture& input, std::span<const uint32_t> vert
               << input.width << 'x' << input.height << " original texture with "
               << colored << " nonblack texels and verified side margins\n";
 }
+void rejectFlver(std::span<const uint8_t> file) {
+    try {
+        (void)sekiro::assets::readFlver2(file);
+    } catch (const std::runtime_error&) {
+        return;
+    }
+    throw std::runtime_error("Malformed FLVER accepted");
+}
+
+void verifyMesh(std::span<const uint32_t> vertex, std::span<const uint32_t> fragment) {
+    auto bytes = fixture::flver();
+    const auto model = sekiro::assets::readFlver2(bytes);
+    require(model.vertices.size() == 8 && model.indices.size() == 12 && model.surfaces.size() == 2,
+            "FLVER vertex streams or strip decode failed");
+    require(std::equal(model.indices.begin(), model.indices.begin() + 6,
+                       std::array<uint32_t, 6>{0, 1, 2, 2, 1, 3}.begin()), "FLVER winding failed");
+    require(model.vertices[3].uv == std::array{1.0f, 1.0f}, "Packed UV decode failed");
+    require(model.bones.size() == 2 && model.bones[1].parent == 0 &&
+            model.bones[1].name == u"child", "FLVER bone hierarchy failed");
+    rejectFlver(std::span(bytes).first(bytes.size() - 1));
+    fixture::write(bytes, fixture::boneTable + 28, 1, 2);
+    rejectFlver(bytes);
+
+    Vulkan vulkan;
+    vulkan.start();
+    const VkExtent2D extent{480, 260};
+    const auto area = safeViewport(extent, {36, 4, 12, 8});
+    require(area.offset.x == 36 && area.offset.y == 4 && area.extent.width == 432 && area.extent.height == 248,
+            "Cutout-safe viewport sizing failed");
+    const auto stale = safeViewport({100, 40}, {120, 0, 0, 0});
+    require(stale.extent.width == 100 && stale.offset.x == 0, "Stale cutout exceeds viewport");
+    vulkan.createTarget(VK_FORMAT_R8G8B8A8_UNORM, extent, true);
+
+    MeshPreview preview(vulkan.device);
+    const sekiro::assets::Texture red{1, 1, {255, 16, 8, 255}};
+    preview.initialize(vulkan.physical, vulkan.queue, vulkan.command, vulkan.pass,
+                       model, &red, u"previewalbedo", false, vertex, fragment);
+    require(preview.texturedSurfaces() == 1, "Imported material did not match exactly one FLVER surface");
+    const auto pixels = vulkan.render(preview, extent, area);
+    const auto center = 4 * ((area.offset.y + area.extent.height / 2) * extent.width +
+                             area.offset.x + area.extent.width / 2);
+    require(pixels[center] > 90 && pixels[center + 1] < 32 && pixels[center + 2] < 32,
+            "Indexed foreground failed the material or depth check");
+    size_t rendered = 0;
+    for (size_t i = 0; i < pixels.size(); i += 4) {
+        rendered += pixels[i] != 0;
+        const auto x = (i / 4) % extent.width;
+        const auto y = (i / 4) / extent.width;
+        const auto left = static_cast<uint32_t>(area.offset.x);
+        const auto top = static_cast<uint32_t>(area.offset.y);
+        if (x < left || x >= left + area.extent.width || y < top || y >= top + area.extent.height) {
+            require(pixels[i] == 0 && pixels[i + 1] == 0 && pixels[i + 2] == 0,
+                    "Mesh rendered into a cutout margin");
+        }
+    }
+    require(rendered > 1'000, "Indexed preview did not rasterize sufficient geometry");
+    std::cout << "FLVER fixture: two streams per mesh, strips, bones, material matching and cutout-safe "
+                 "depth-tested rendering passed (" << rendered << " pixels)\n";
+}
 }
 
 int main(int argc, char** argv) {
     try {
-        require(argc == 4, "Usage: test_vulkan_preview TEXTURE.TPF PREVIEW.VERT.SPV PREVIEW.FRAG.SPV");
+        require(argc == 6, "Usage: test_vulkan_preview TEXTURE.TPF PREVIEW.VERT.SPV PREVIEW.FRAG.SPV MODEL.VERT.SPV MODEL.FRAG.SPV");
         const auto texture = sekiro::assets::readTpfBc1(read(argv[1]));
         const auto vertex = shader(argv[2]);
         const auto fragment = shader(argv[3]);
         verify(texture, vertex, fragment, false);
         verify(texture, vertex, fragment, true);
+        verifyMesh(shader(argv[4]), shader(argv[5]));
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
         return 1;

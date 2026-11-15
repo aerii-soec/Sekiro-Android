@@ -3,8 +3,10 @@ project(sekiro_native LANGUAGES C CXX)
 
 add_library(sekiro_native SHARED
     assets/bnd4.cpp
+    assets/flver.cpp
     assets/tpf.cpp
     main.cpp
+    mesh_preview.cpp
     preview_texture.cpp
     vulkan_renderer.cpp
     "${ANDROID_NDK}/sources/android/native_app_glue/android_native_app_glue.c"

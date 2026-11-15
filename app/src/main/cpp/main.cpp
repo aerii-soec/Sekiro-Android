@@ -1,13 +1,16 @@
 #include "assets/bnd4.h"
+#include "assets/flver.h"
 #include "vulkan_renderer.h"
 
 #include <android/log.h>
 #include <android_native_app_glue.h>
 
+#include <algorithm>
 #include <exception>
 #include <filesystem>
 #include <fstream>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -15,13 +18,20 @@
 namespace {
 constexpr char logTag[] = "SekiroNative";
 
+std::mutex windowInsetsMutex;
+std::array<uint32_t, 4> windowInsets{};
+ALooper* insetLooper = nullptr;
+
 struct Application {
     std::optional<sekiro::assets::Texture> texture;
+    std::u16string textureStem;
+    std::optional<sekiro::assets::FlverModel> model;
     std::unique_ptr<VulkanRenderer> renderer;
     bool resumed = false;
     bool focused = false;
     bool redraw = true;
     bool failed = false;
+    std::array<uint32_t, 4> cutout{};
 
     bool canDraw() const { return renderer && resumed && focused && redraw; }
 };
@@ -69,15 +79,27 @@ void reportIssue(ANativeActivity& activity, const char* message) {
     activity.vm->DetachCurrentThread();
 }
 
+sekiro::assets::FlverModel readPreviewModel(std::span<const uint8_t> bytes) {
+    if (bytes.size() >= 4 && std::equal(bytes.begin(), bytes.begin() + 4, "BND4")) {
+        const auto members = sekiro::assets::readBnd4(bytes);
+        for (const auto& member : members) {
+            if (!member.compressed && member.path.ends_with(u".flver")) {
+                return sekiro::assets::readFlver2(bytes.subspan(member.offset, member.storedBytes));
+            }
+        }
+        throw std::runtime_error("The BND4 has no uncompressed FLVER member. Open an exported FLVER file.");
+    }
+    return sekiro::assets::readFlver2(bytes);
+}
+
 void loadInspectionAssets(ANativeActivity& activity, Application& state) {
     const char* filesDirectory = activity.internalDataPath;
-    __android_log_print(ANDROID_LOG_INFO, logTag, "Native activity started; private files directory: %s",
-                        filesDirectory ? filesDirectory : "(unavailable)");
     if (!filesDirectory) {
         reportIssue(activity, "The Android app files directory is unavailable.");
         return;
     }
     const std::filesystem::path directory(filesDirectory);
+    __android_log_print(ANDROID_LOG_INFO, logTag, "Native activity files: %s", filesDirectory);
     try {
         const auto binder = readLocalAsset(directory / "inspection.bnd");
         if (!binder.empty()) {
@@ -88,25 +110,41 @@ void loadInspectionAssets(ANativeActivity& activity, Application& state) {
         __android_log_print(ANDROID_LOG_WARN, logTag, "BND4: %s", error.what());
     }
 
+    std::string assetError;
     try {
-        const auto path = directory / "inspection.tpf";
-        const auto texture = readLocalAsset(path);
-        if (texture.empty()) {
-            __android_log_print(ANDROID_LOG_WARN, logTag,
-                                "No readable texture at %s; APK ships shaders without game assets", path.c_str());
-            reportIssue(activity, "Open inspection.tpf from your local Sekiro files to preview the texture.");
-            return;
+        if (!std::filesystem::exists(directory / "texture-only")) {
+            const auto bytes = readLocalAsset(directory / "inspection.flver");
+            if (!bytes.empty()) {
+                state.model = readPreviewModel(bytes);
+                __android_log_print(ANDROID_LOG_INFO, logTag, "Decoded FLVER (%zu bytes), %zu material records, %zu bones",
+                                    bytes.size(), state.model->materials.size(), state.model->bones.size());
+            }
         }
-        state.texture = sekiro::assets::readTpfBc1(texture);
-        __android_log_print(ANDROID_LOG_INFO, logTag, "Loaded private inspection.tpf (%zu bytes); decoded %ux%u BC1 sRGB mip 0",
-                            texture.size(), state.texture->width, state.texture->height);
     } catch (const std::exception& error) {
-        __android_log_print(ANDROID_LOG_ERROR, logTag, "TPF load failed: %s", error.what());
-        const std::string message = std::string("Could not decode inspection.tpf. ") + error.what();
-        reportIssue(activity, message.c_str());
+        assetError = std::string("Could not load the model. ") + error.what();
+        __android_log_write(ANDROID_LOG_ERROR, logTag, assetError.c_str());
+    }
+    try {
+        const auto bytes = readLocalAsset(directory / "inspection.tpf");
+        if (!bytes.empty()) {
+            state.texture = sekiro::assets::readTpfBc1(bytes);
+            state.textureStem = sekiro::assets::assetStem(sekiro::assets::tpfTextureName(bytes));
+            __android_log_print(ANDROID_LOG_INFO, logTag, "Loaded private inspection.tpf (%zu bytes); decoded %ux%u BC1 sRGB mip 0",
+                                bytes.size(), state.texture->width, state.texture->height);
+        }
+    } catch (const std::exception& error) {
+        if (assetError.empty()) {
+            assetError = std::string("Could not decode inspection.tpf. ") + error.what();
+        }
+        __android_log_print(ANDROID_LOG_ERROR, logTag, "TPF: %s", error.what());
+    }
+    if (!assetError.empty()) {
+        reportIssue(activity, assetError.c_str());
+    } else if (!state.model && !state.texture) {
+        __android_log_write(ANDROID_LOG_INFO, logTag, "No local preview assets; APK ships shaders without game assets");
+        reportIssue(activity, "Open a TPF texture or FLVER model from your local Sekiro files.");
     }
 }
-
 
 void fail(android_app& app, Application& state, const char* error) {
     __android_log_print(ANDROID_LOG_ERROR, logTag, "%s", error);
@@ -114,6 +152,19 @@ void fail(android_app& app, Application& state, const char* error) {
     state.failed = true;
     const std::string message = std::string("Vulkan preview failed. ") + error;
     reportIssue(*app.activity, message.c_str());
+}
+
+void updateCutout(Application& state) {
+    const std::scoped_lock lock(windowInsetsMutex);
+    if (state.cutout != windowInsets) {
+        state.cutout = windowInsets;
+        __android_log_print(ANDROID_LOG_INFO, logTag, "Display cutout insets %u,%u,%u,%u",
+                            windowInsets[0], windowInsets[1], windowInsets[2], windowInsets[3]);
+        if (state.renderer) {
+            state.renderer->setCutout(state.cutout);
+        }
+        state.redraw = true;
+    }
 }
 
 void onCommand(android_app* app, int32_t command) {
@@ -126,7 +177,9 @@ void onCommand(android_app* app, int32_t command) {
                 __android_log_print(ANDROID_LOG_INFO, logTag, "Native window initialized (%dx%d)",
                                     ANativeWindow_getWidth(app->window), ANativeWindow_getHeight(app->window));
                 state.renderer->initialize(app->window, app->activity->assetManager,
-                                           state.texture ? &*state.texture : nullptr);
+                                           state.texture ? &*state.texture : nullptr,
+                                           state.model ? &*state.model : nullptr, state.textureStem);
+                state.renderer->setCutout(state.cutout);
                 state.redraw = true;
             }
             break;
@@ -135,6 +188,7 @@ void onCommand(android_app* app, int32_t command) {
             state.renderer.reset();
             break;
         case APP_CMD_WINDOW_RESIZED:
+        case APP_CMD_CONTENT_RECT_CHANGED:
         case APP_CMD_CONFIG_CHANGED:
             if (state.renderer) {
                 state.renderer->invalidateSwapchain();
@@ -170,10 +224,15 @@ void android_main(android_app* app) {
     Application state;
     app->userData = &state;
     app->onAppCmd = onCommand;
+    {
+        const std::scoped_lock lock(windowInsetsMutex);
+        insetLooper = app->looper;
+    }
     loadInspectionAssets(*app->activity, state);
     while (!app->destroyRequested) {
         void* data = nullptr;
         const int events = ALooper_pollOnce(state.canDraw() ? 16 : -1, nullptr, nullptr, &data);
+        updateCutout(state);
         if (data) {
             auto* source = static_cast<android_poll_source*>(data);
             source->process(app, source);
@@ -189,10 +248,29 @@ void android_main(android_app* app) {
             }
         }
     }
+    const std::scoped_lock lock(windowInsetsMutex);
+    if (insetLooper == app->looper) {
+        insetLooper = nullptr;
+        windowInsets = {};
+    }
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_dev_sekiro_nativeport_PreviewActivity_nativeSetCutout(JNIEnv*, jclass, jint left, jint top,
+                                                         jint right, jint bottom) {
+    const std::array<uint32_t, 4> insets{static_cast<uint32_t>(left), static_cast<uint32_t>(top),
+                                         static_cast<uint32_t>(right), static_cast<uint32_t>(bottom)};
+    const std::scoped_lock lock(windowInsetsMutex);
+    if (windowInsets != insets) {
+        windowInsets = insets;
+        if (insetLooper) {
+            ALooper_wake(insetLooper);
+        }
+    }
 }
 
 extern "C" JNIEXPORT jstring JNICALL
-Java_dev_sekiro_nativeport_PreviewActivity_validateTexture(JNIEnv* env, jclass, jstring path) {
+Java_dev_sekiro_nativeport_PreviewActivity_validateAsset(JNIEnv* env, jclass, jstring path, jboolean model) {
     const char* text = env->GetStringUTFChars(path, nullptr);
     if (!text) {
         return nullptr;
@@ -200,7 +278,12 @@ Java_dev_sekiro_nativeport_PreviewActivity_validateTexture(JNIEnv* env, jclass, 
     const auto release = [&](const char* value) { env->ReleaseStringUTFChars(path, value); };
     const std::unique_ptr<const char, decltype(release)> input(text, release);
     try {
-        (void)sekiro::assets::readTpfBc1(readLocalAsset(input.get()));
+        const auto bytes = readLocalAsset(input.get());
+        if (model) {
+            (void)readPreviewModel(bytes);
+        } else {
+            (void)sekiro::assets::readTpfBc1(bytes);
+        }
         return nullptr;
     } catch (const std::exception& error) {
         return env->NewStringUTF(error.what());

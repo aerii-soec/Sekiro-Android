@@ -1,36 +1,12 @@
 #include "preview_texture.h"
+#include "assets/flver.h"
+#include "vulkan_memory.h"
 
 #include <algorithm>
 #include <array>
 #include <cstring>
-#include <stdexcept>
-#include <string>
 
 namespace {
-void check(VkResult result, const char* operation) {
-    if (result != VK_SUCCESS) {
-        throw std::runtime_error(std::string(operation) + " returned VkResult " + std::to_string(result));
-    }
-}
-
-VkDeviceMemory allocateMemory(VkDevice device, VkPhysicalDevice physicalDevice,
-                              const VkMemoryRequirements& requirements, VkMemoryPropertyFlags flags) {
-    VkPhysicalDeviceMemoryProperties properties{};
-    vkGetPhysicalDeviceMemoryProperties(physicalDevice, &properties);
-    for (uint32_t i = 0; i < properties.memoryTypeCount; ++i) {
-        if ((requirements.memoryTypeBits & (1u << i)) &&
-            (properties.memoryTypes[i].propertyFlags & flags) == flags) {
-            VkMemoryAllocateInfo info{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
-            info.allocationSize = requirements.size;
-            info.memoryTypeIndex = i;
-            VkDeviceMemory memory = VK_NULL_HANDLE;
-            check(vkAllocateMemory(device, &info, nullptr, &memory), "vkAllocateMemory (preview)");
-            return memory;
-        }
-    }
-    throw std::runtime_error("No compatible Vulkan memory type for preview texture");
-}
-
 struct StagingBuffer {
     VkDevice device;
     VkBuffer buffer = VK_NULL_HANDLE;
@@ -49,14 +25,14 @@ struct ShaderModule {
         VkShaderModuleCreateInfo info{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
         info.codeSize = words.size_bytes();
         info.pCode = words.data();
-        check(vkCreateShaderModule(device, &info, nullptr, &module), stage);
+        checkVulkan(vkCreateShaderModule(device, &info, nullptr, &module), stage);
     }
     ~ShaderModule() { vkDestroyShaderModule(device, module, nullptr); }
 };
 }
 
 void PreviewTexture::upload(VkPhysicalDevice physicalDevice, VkQueue queue, VkCommandBuffer commands,
-                            const sekiro::assets::Texture& texture, bool srgbAttachment) {
+                            const sekiro::assets::Texture& texture, bool srgbAttachment, bool repeating) {
     size_ = {texture.width, texture.height};
     // With an UNORM attachment the nearest sampler passes the original sRGB bytes through.
     const VkFormat format = srgbAttachment ? VK_FORMAT_R8G8B8A8_SRGB : VK_FORMAT_R8G8B8A8_UNORM;
@@ -70,31 +46,31 @@ void PreviewTexture::upload(VkPhysicalDevice physicalDevice, VkQueue queue, VkCo
     imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
     imageInfo.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
     imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-    check(vkCreateImage(device_, &imageInfo, nullptr, &image_), "vkCreateImage (preview texture)");
+    checkVulkan(vkCreateImage(device_, &imageInfo, nullptr, &image_), "vkCreateImage (preview texture)");
     VkMemoryRequirements requirements{};
     vkGetImageMemoryRequirements(device_, image_, &requirements);
-    memory_ = allocateMemory(device_, physicalDevice, requirements, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-    check(vkBindImageMemory(device_, image_, memory_, 0), "vkBindImageMemory (preview texture)");
+    memory_ = allocateGpuMemory(device_, physicalDevice, requirements, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    checkVulkan(vkBindImageMemory(device_, image_, memory_, 0), "vkBindImageMemory (preview texture)");
 
     StagingBuffer staging{device_};
     VkBufferCreateInfo bufferInfo{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
     bufferInfo.size = texture.rgba.size();
     bufferInfo.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
     bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-    check(vkCreateBuffer(device_, &bufferInfo, nullptr, &staging.buffer), "vkCreateBuffer (texture staging)");
+    checkVulkan(vkCreateBuffer(device_, &bufferInfo, nullptr, &staging.buffer), "vkCreateBuffer (texture staging)");
     vkGetBufferMemoryRequirements(device_, staging.buffer, &requirements);
-    staging.memory = allocateMemory(device_, physicalDevice, requirements,
+    staging.memory = allocateGpuMemory(device_, physicalDevice, requirements,
                                     VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-    check(vkBindBufferMemory(device_, staging.buffer, staging.memory, 0), "vkBindBufferMemory (texture staging)");
+    checkVulkan(vkBindBufferMemory(device_, staging.buffer, staging.memory, 0), "vkBindBufferMemory (texture staging)");
     void* mapped = nullptr;
-    check(vkMapMemory(device_, staging.memory, 0, bufferInfo.size, 0, &mapped), "vkMapMemory (texture staging)");
+    checkVulkan(vkMapMemory(device_, staging.memory, 0, bufferInfo.size, 0, &mapped), "vkMapMemory (texture staging)");
     std::memcpy(mapped, texture.rgba.data(), texture.rgba.size());
     vkUnmapMemory(device_, staging.memory);
 
-    check(vkResetCommandBuffer(commands, 0), "vkResetCommandBuffer (texture upload)");
+    checkVulkan(vkResetCommandBuffer(commands, 0), "vkResetCommandBuffer (texture upload)");
     VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    check(vkBeginCommandBuffer(commands, &begin), "vkBeginCommandBuffer (texture upload)");
+    checkVulkan(vkBeginCommandBuffer(commands, &begin), "vkBeginCommandBuffer (texture upload)");
 
     VkImageMemoryBarrier barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
     barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
@@ -118,35 +94,35 @@ void PreviewTexture::upload(VkPhysicalDevice physicalDevice, VkQueue queue, VkCo
     barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
     vkCmdPipelineBarrier(commands, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
                          0, 0, nullptr, 0, nullptr, 1, &barrier);
-    check(vkEndCommandBuffer(commands), "vkEndCommandBuffer (texture upload)");
+    checkVulkan(vkEndCommandBuffer(commands), "vkEndCommandBuffer (texture upload)");
     VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
     submit.commandBufferCount = 1;
     submit.pCommandBuffers = &commands;
-    check(vkQueueSubmit(queue, 1, &submit, VK_NULL_HANDLE), "vkQueueSubmit (texture upload)");
-    check(vkQueueWaitIdle(queue), "vkQueueWaitIdle (texture upload)");
+    checkVulkan(vkQueueSubmit(queue, 1, &submit, VK_NULL_HANDLE), "vkQueueSubmit (texture upload)");
+    checkVulkan(vkQueueWaitIdle(queue), "vkQueueWaitIdle (texture upload)");
 
     VkImageViewCreateInfo viewInfo{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
     viewInfo.image = image_;
     viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
     viewInfo.format = format;
     viewInfo.subresourceRange = barrier.subresourceRange;
-    check(vkCreateImageView(device_, &viewInfo, nullptr, &view_), "vkCreateImageView (preview texture)");
+    checkVulkan(vkCreateImageView(device_, &viewInfo, nullptr, &view_), "vkCreateImageView (preview texture)");
 
     VkSamplerCreateInfo samplerInfo{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
     samplerInfo.magFilter = VK_FILTER_NEAREST;
     samplerInfo.minFilter = VK_FILTER_NEAREST;
     samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
-    samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-    samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    samplerInfo.addressModeU = repeating ? VK_SAMPLER_ADDRESS_MODE_REPEAT : VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    samplerInfo.addressModeV = samplerInfo.addressModeU;
     samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-    check(vkCreateSampler(device_, &samplerInfo, nullptr, &sampler_), "vkCreateSampler (preview texture)");
+    checkVulkan(vkCreateSampler(device_, &samplerInfo, nullptr, &sampler_), "vkCreateSampler (preview texture)");
 
     const VkDescriptorSetLayoutBinding binding{0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1,
                                                VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
     VkDescriptorSetLayoutCreateInfo descriptorLayout{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
     descriptorLayout.bindingCount = 1;
     descriptorLayout.pBindings = &binding;
-    check(vkCreateDescriptorSetLayout(device_, &descriptorLayout, nullptr, &descriptorLayout_),
+    checkVulkan(vkCreateDescriptorSetLayout(device_, &descriptorLayout, nullptr, &descriptorLayout_),
           "vkCreateDescriptorSetLayout (preview)");
 
     const VkDescriptorPoolSize poolSize{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1};
@@ -154,12 +130,12 @@ void PreviewTexture::upload(VkPhysicalDevice physicalDevice, VkQueue queue, VkCo
     pool.maxSets = 1;
     pool.poolSizeCount = 1;
     pool.pPoolSizes = &poolSize;
-    check(vkCreateDescriptorPool(device_, &pool, nullptr, &descriptorPool_), "vkCreateDescriptorPool (preview)");
+    checkVulkan(vkCreateDescriptorPool(device_, &pool, nullptr, &descriptorPool_), "vkCreateDescriptorPool (preview)");
     VkDescriptorSetAllocateInfo descriptorInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
     descriptorInfo.descriptorPool = descriptorPool_;
     descriptorInfo.descriptorSetCount = 1;
     descriptorInfo.pSetLayouts = &descriptorLayout_;
-    check(vkAllocateDescriptorSets(device_, &descriptorInfo, &descriptor_), "vkAllocateDescriptorSets (preview)");
+    checkVulkan(vkAllocateDescriptorSets(device_, &descriptorInfo, &descriptor_), "vkAllocateDescriptorSets (preview)");
     const VkDescriptorImageInfo imageDescriptor{sampler_, view_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
     VkWriteDescriptorSet write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
     write.dstSet = descriptor_;
@@ -170,7 +146,7 @@ void PreviewTexture::upload(VkPhysicalDevice physicalDevice, VkQueue queue, VkCo
 }
 
 void PreviewTexture::createPipeline(VkRenderPass renderPass, std::span<const uint32_t> vertex,
-                                    std::span<const uint32_t> fragment) {
+                                    std::span<const uint32_t> fragment, bool mesh) {
     const ShaderModule vertexShader(device_, vertex, "vkCreateShaderModule (preview.vert)");
     const ShaderModule fragmentShader(device_, fragment, "vkCreateShaderModule (preview.frag)");
     const std::array stages{
@@ -179,9 +155,22 @@ void PreviewTexture::createPipeline(VkRenderPass renderPass, std::span<const uin
         VkPipelineShaderStageCreateInfo{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0,
                                         VK_SHADER_STAGE_FRAGMENT_BIT, fragmentShader.module, "main"},
     };
-    const VkPipelineVertexInputStateCreateInfo input{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
+    using sekiro::assets::FlverVertex;
+    const VkVertexInputBindingDescription binding{0, sizeof(FlverVertex), VK_VERTEX_INPUT_RATE_VERTEX};
+    const std::array attributes{
+        VkVertexInputAttributeDescription{0, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(FlverVertex, position)},
+        VkVertexInputAttributeDescription{1, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(FlverVertex, normal)},
+        VkVertexInputAttributeDescription{2, 0, VK_FORMAT_R32G32_SFLOAT, offsetof(FlverVertex, uv)},
+    };
+    VkPipelineVertexInputStateCreateInfo input{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
+    if (mesh) {
+        input.vertexBindingDescriptionCount = 1;
+        input.pVertexBindingDescriptions = &binding;
+        input.vertexAttributeDescriptionCount = attributes.size();
+        input.pVertexAttributeDescriptions = attributes.data();
+    }
     VkPipelineInputAssemblyStateCreateInfo assembly{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
-    assembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP;
+    assembly.topology = mesh ? VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST : VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP;
     VkPipelineViewportStateCreateInfo viewport{VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO};
     viewport.viewportCount = 1;
     viewport.scissorCount = 1;
@@ -202,13 +191,18 @@ void PreviewTexture::createPipeline(VkRenderPass renderPass, std::span<const uin
     dynamic.dynamicStateCount = dynamicStates.size();
     dynamic.pDynamicStates = dynamicStates.data();
 
-    const VkPushConstantRange scale{VK_SHADER_STAGE_VERTEX_BIT, 0, 2 * sizeof(float)};
+    const VkPushConstantRange scale{VK_SHADER_STAGE_VERTEX_BIT, 0,
+                                    static_cast<uint32_t>((mesh ? 18 : 2) * sizeof(float))};
+    VkPipelineDepthStencilStateCreateInfo depth{VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
+    depth.depthTestEnable = mesh;
+    depth.depthWriteEnable = mesh;
+    depth.depthCompareOp = VK_COMPARE_OP_LESS;
     VkPipelineLayoutCreateInfo layout{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
     layout.setLayoutCount = 1;
     layout.pSetLayouts = &descriptorLayout_;
     layout.pushConstantRangeCount = 1;
     layout.pPushConstantRanges = &scale;
-    check(vkCreatePipelineLayout(device_, &layout, nullptr, &pipelineLayout_), "vkCreatePipelineLayout (preview)");
+    checkVulkan(vkCreatePipelineLayout(device_, &layout, nullptr, &pipelineLayout_), "vkCreatePipelineLayout (preview)");
 
     VkGraphicsPipelineCreateInfo info{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
     info.stageCount = stages.size();
@@ -218,24 +212,25 @@ void PreviewTexture::createPipeline(VkRenderPass renderPass, std::span<const uin
     info.pViewportState = &viewport;
     info.pRasterizationState = &raster;
     info.pMultisampleState = &samples;
+    info.pDepthStencilState = mesh ? &depth : nullptr;
     info.pColorBlendState = &blend;
     info.pDynamicState = &dynamic;
     info.layout = pipelineLayout_;
     info.renderPass = renderPass;
-    check(vkCreateGraphicsPipelines(device_, VK_NULL_HANDLE, 1, &info, nullptr, &pipeline_),
+    checkVulkan(vkCreateGraphicsPipelines(device_, VK_NULL_HANDLE, 1, &info, nullptr, &pipeline_),
           "vkCreateGraphicsPipelines (texture preview)");
 }
 
-void PreviewTexture::draw(VkCommandBuffer commands, VkExtent2D extent) const {
-    const VkViewport viewport{0.0f, 0.0f, static_cast<float>(extent.width),
-                             static_cast<float>(extent.height), 0.0f, 1.0f};
-    const VkRect2D scissor{{0, 0}, extent};
+void PreviewTexture::draw(VkCommandBuffer commands, VkRect2D area) const {
+    const VkViewport viewport{static_cast<float>(area.offset.x), static_cast<float>(area.offset.y),
+                              static_cast<float>(area.extent.width), static_cast<float>(area.extent.height),
+                              0.0f, 1.0f};
     const float aspectRatio = (static_cast<float>(size_.width) / size_.height) /
                               (viewport.width / viewport.height);
     const std::array scale{std::min(1.0f, aspectRatio), std::min(1.0f, 1.0f / aspectRatio)};
     vkCmdBindPipeline(commands, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_);
     vkCmdSetViewport(commands, 0, 1, &viewport);
-    vkCmdSetScissor(commands, 0, 1, &scissor);
+    vkCmdSetScissor(commands, 0, 1, &area);
     vkCmdBindDescriptorSets(commands, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout_, 0, 1, &descriptor_,
                             0, nullptr);
     vkCmdPushConstants(commands, pipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT, 0,

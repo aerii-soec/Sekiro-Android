@@ -87,4 +87,25 @@ Texture readTpfBc1(std::span<const uint8_t> bytes) {
     }
     return texture;
 }
+
+std::u16string tpfTextureName(std::span<const uint8_t> bytes) {
+    // Only used after validating the package with readTpfBc1.
+    if (bytes.size() < 36 || bytes[14] != 1) {
+        return {};
+    }
+    const auto offset = readU32(bytes, 28);
+    const auto texture = readU32(bytes, 16);
+    if (offset < 36 || offset % 2 != 0 || texture > bytes.size() || offset >= texture) {
+        return {};
+    }
+    std::u16string name;
+    for (size_t at = offset; at + 2 <= texture && name.size() < 1024; at += 2) {
+        const auto unit = static_cast<char16_t>(bytes[at] | static_cast<uint16_t>(bytes[at + 1]) << 8);
+        if (!unit) {
+            return name;
+        }
+        name.push_back(unit);
+    }
+    return {};
+}
 }

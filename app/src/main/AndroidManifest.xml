@@ -2,7 +2,8 @@
     <uses-feature android:name="android.hardware.vulkan.version"
                   android:version="0x00400000" android:required="true" />
     <application android:label="Sekiro Native Development"
-                 android:allowBackup="false">
+                 android:allowBackup="false"
+                 android:enableOnBackInvokedCallback="false">
         <activity android:name=".PreviewActivity"
                   android:exported="true"
                   android:screenOrientation="sensorLandscape"

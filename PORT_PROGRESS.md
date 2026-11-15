@@ -1,5 +1,14 @@
 # Port progress
 
+## Fullscreen and static model preview
+
+- The user verified v0.2.0 installation, landscape, and visible original Data5 texture on an Android phone. Status and navigation bars remained visible in that build.
+- Version 0.3.0 requests immersive control again on resume, focus, configuration change and when Android grants control of the system-bar insets. The swapchain uses the Android surface extent. Native viewports account for cutout safe insets, and both previews preserve aspect ratio.
+- Added a bounded little-endian Sekiro FLVER2 reader for supported base-LOD geometry and linked BND4 members, including multiple vertex streams, positions, normals, UV0, indexed faces, material references and bone parents. The Vulkan preview uses device-local vertex/index buffers, a perspective camera and depth. It can bind one supported imported diffuse texture by matching its original basename.
+- Host Vulkan readback tested the original Data5 texture in UNORM and sRGB. A synthetic FLVER2 fixture exercised multi-stream parsing, strip restart and winding, bone hierarchy validation, one material match, depth occlusion and a cutout-safe viewport. No complete original FLVER was recovered from the local read-only archive scan. Original 3D geometry, textures and on-device behavior of v0.3.0 remain unverified.
+- The signed ARM64 v0.3.0 APK passed signature and 16 KiB alignment checks. The four Python tests and sanitized BND4 and TPF tests passed. The host Vulkan run used Khronos validation with synchronization checks and logged no validation warnings or errors. ADB found no connected device or configured local AVD for this build.
+- Inspected the original Data1 Havok 2016 cutscene tagfile and recovered skeleton-parent and animation-binding metadata. It is a single-bone camera and marker scene. A matching character mesh, rig and idle clip for GPU skinning validation are still needed. [Asset and engine evidence](reverse-engineering/reports/engine-evidence.md#model-and-animation-follow-up)
+
 ## Android rendering follow-up
 
 The phone test of `cbdb888` confirmed installation, startup and a solid blue-gray surface. The APK contained no game assets. Its clear-only render pass used RGBA `(0.025, 0.07, 0.085, 1)` when private `inspection.tpf` was absent. Even with an asset present, that version copied pixels directly to the swapchain and had no shader sampling pipeline.
@@ -28,8 +37,8 @@ The phone test of `cbdb888` confirmed installation, startup and a solid blue-gra
 
 ## Next engineering tasks
 
-1. On Vulkan-capable ARM64 hardware, verify installation, the clear frame, the Data5 texture and surface recreation after rotation or backgrounding. Use the existing [smoke test instructions](README.md#android-smoke-test).
+1. On Vulkan-capable ARM64 hardware, verify that v0.3.0 hides both bars and that the Data5 texture stays aspect-correct after rotation, system gestures and backgrounding. Use the [smoke test instructions](README.md#android-smoke-test).
 2. Compare an authorized clean Steam 1.06 executable with the recorded Ghidra input before treating engine behavior as stock. Trace the archive object initialization at `0x141de3d10` and its registration at `0x141a075d0`.
-3. Obtain an authorized FLVER2 mesh and its associated textures. Decode static positions, multi-attribute vertex layout and face sets on the host, then upload vertex and index buffers with a shader-based Vulkan material path.
+3. Import an authorized original FLVER2 export and its matching texture. Verify geometry, UV mapping, orientation and scale against a reference viewer, then validate the matching character skeleton and idle clip.
 
 The debug APK is at `app/build/outputs/apk/debug/app-debug.apk`. Generated local evidence and staged samples are under `reverse-engineering/reports/generated`.

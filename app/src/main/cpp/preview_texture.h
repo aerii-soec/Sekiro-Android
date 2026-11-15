@@ -12,10 +12,14 @@ public:
     ~PreviewTexture();
 
     void upload(VkPhysicalDevice physicalDevice, VkQueue queue, VkCommandBuffer commands,
-                const sekiro::assets::Texture& texture, bool srgbAttachment);
+                const sekiro::assets::Texture& texture, bool srgbAttachment, bool repeating = false);
     void createPipeline(VkRenderPass renderPass, std::span<const uint32_t> vertex,
-                        std::span<const uint32_t> fragment);
-    void draw(VkCommandBuffer commands, VkExtent2D extent) const;
+                        std::span<const uint32_t> fragment, bool mesh = false);
+    void draw(VkCommandBuffer commands, VkRect2D area) const;
+
+    VkDescriptorSet descriptor() const { return descriptor_; }
+    VkPipeline pipeline() const { return pipeline_; }
+    VkPipelineLayout pipelineLayout() const { return pipelineLayout_; }
 
 private:
     VkDevice device_;

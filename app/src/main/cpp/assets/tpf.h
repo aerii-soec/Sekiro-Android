@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <span>
+#include <string>
 #include <vector>
 
 namespace sekiro::assets {
@@ -14,5 +15,6 @@ struct Texture {
 
 // Decodes the first mip of a single-texture PC TPF with a 2D BC1 sRGB DDS.
 Texture readTpfBc1(std::span<const uint8_t> bytes);
+std::u16string tpfTextureName(std::span<const uint8_t> bytes);
 
 }

@@ -48,4 +48,22 @@ The BHD fingerprint and paired BDT inventory used read-only file handles. None o
 
 ## Reuse candidates
 
+### Model and animation follow-up
+
+- A read-only scan covered all five BDTs. It found 19,705 DCX/KRAK headers and 56 FLVER-looking signatures with plausible version and data fields. Those signatures did not have intact FLVER record tables at the corresponding raw offsets. Two bounded decoding passes over selected KRAK candidates and an additional DFLT pass produced textures, cutscene binders and other resources, with no complete original FLVER recovered. The scan does not classify every BDT entry. Ghidra shows that `0x141de3d10` reads an archive index, transforms the bytes through another object, then checks for `BHD5`. A verified exported model is needed for original-geometry tests.
+- The host parser implements a subset of Sekiro's little-endian Unicode FLVER2 formats `0x2001a` and `0x20016`. It checks vertex layouts, base-LOD indices, material references and bone-parent ranges. Its validation fixture exercises the implementation independently of original data. [SoulsFormats FLVER reader](https://github.com/JKAnderson/SoulsFormats/blob/master/SoulsFormats/Formats/FLVER/FLVER2/FLVER2.cs)
+- The 11,960-byte `a0000.hkx` member of the verified Data1 binder is Havok `TAG0`, SDK `20160200`. The type and item tables identify two one-bone skeletons, `cam0000` and `d0000_0000`, and two spline clips with 361 and 2 frames, both reporting 12 seconds. Bindings point to bone 0. The full Soulstruct decoder failed on an unsupported `hkPropertyBag` type for this sample. A metadata-only probe worked with Soulstruct Havok 1.5.0. This cutscene lacks a character rig and a verified idle clip. [Sekiro Animation Bridge format reference](https://github.com/Beertraps/SekiroAnimationBridge)
+
+The local Havok metadata report can be reproduced from the existing staged sample with this command after adding Soulstruct Havok 1.5.0 to the local Python environment.
+
+```powershell
+python tools/inspect_sekiro_hkx.py reverse-engineering/reports/generated/inspection.bnd --offset 0x1e0 --length 11960
+```
+
+### Targeted vertical-slice references
+
+The existing Ghidra project was used in read-only mode with auto-analysis disabled. The local results are in `reverse-engineering/reports/generated/vertical-slice`. `0x1406e0dc0` registers MapStudio-related paths and calls the earlier archive mount routine `0x1406e1be0`. `0x1410957c0` references a MapStudio data string. `0x1400b73c0` references the ChrAsm name. These are leads for map loading and character assembly. The inspected MoveParam, CameraParam, LockCamParam and MapCollision anchors had no direct Ghidra function cross-references. Their movement, camera and collision implementations remain unidentified. The previously suspected scheduler call `0x1411b3ee0` stops a Windows timer and clears a state byte. It does not establish a simulation tick.
+
+### External implementations
+
 The MIT/Apache-2.0 [sekiro-rs project](https://github.com/AKJama/sekiro-rs) publishes a Bevy reimplementation and documents its asset and combat work. Its build and gameplay claims were not verified here. Its documented full setup requests about 50 GB for generated data, exceeding the available workspace space at discovery. Evaluate individual readers and test vectors against the native project's small asset samples before bringing in code. [sekiro-rs setup and architecture](https://github.com/AKJama/sekiro-rs/blob/main/docs/GETTING-STARTED.md)

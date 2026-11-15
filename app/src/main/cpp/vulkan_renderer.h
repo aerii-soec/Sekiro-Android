@@ -1,11 +1,12 @@
 #pragma once
 
-#include "preview_texture.h"
+#include "mesh_preview.h"
 
 #include <android/asset_manager.h>
 #include <android/native_window.h>
 #include <vulkan/vulkan.h>
 
+#include <array>
 #include <cstdint>
 #include <memory>
 #include <vector>
@@ -17,8 +18,10 @@ public:
     VulkanRenderer& operator=(const VulkanRenderer&) = delete;
     ~VulkanRenderer();
 
-    void initialize(ANativeWindow* window, AAssetManager* assets, const sekiro::assets::Texture* texture);
+    void initialize(ANativeWindow* window, AAssetManager* assets, const sekiro::assets::Texture* texture,
+                    const sekiro::assets::FlverModel* model, std::u16string_view textureStem);
     void invalidateSwapchain() { needsSwapchain_ = true; }
+    void setCutout(std::array<uint32_t, 4> insets) { cutout_ = insets; }
     bool draw();
 
 private:
@@ -34,6 +37,10 @@ private:
 
     ANativeWindow* window_ = nullptr;
     const sekiro::assets::Texture* texture_ = nullptr;
+    const sekiro::assets::FlverModel* model_ = nullptr;
+    std::u16string_view textureStem_;
+    std::unique_ptr<MeshPreview> mesh_;
+    std::unique_ptr<DepthImage> depth_;
     AAssetManager* assets_ = nullptr;
     std::unique_ptr<PreviewTexture> preview_;
 
@@ -53,6 +60,7 @@ private:
     VkSwapchainKHR swapchain_ = VK_NULL_HANDLE;
     VkRenderPass renderPass_ = VK_NULL_HANDLE;
     VkExtent2D extent_{};
+    std::array<uint32_t, 4> cutout_{};
     std::vector<FrameImage> frames_;
     bool needsSwapchain_ = true;
     bool loggedPresent_ = false;

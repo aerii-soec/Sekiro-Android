@@ -1,6 +1,6 @@
 # Sekiro native Android development
 
-This Android Studio project builds an ARM64 NativeActivity with a Vulkan preview of a supported texture supplied locally from Data5. It also reads the observed Data1 BND4 binder layout. 3D models, gameplay and game progression are pending.
+This Android Studio project builds an ARM64 NativeActivity with native Vulkan texture and static-mesh previews. The original Data5 texture has been displayed on an Android phone. The FLVER2 path has been tested with a host fixture. An original model, character animation and gameplay remain pending.
 
 ## Build on Windows
 
@@ -11,7 +11,7 @@ $env:ANDROID_HOME = "$env:LOCALAPPDATA\Android\Sdk"
 .\gradlew.bat :app:assembleDebug
 ```
 
-The signed debug APK is at `app/build/outputs/apk/debug/app-debug.apk`. Gradle compiles the GLSL in `app/src/main/shaders` to SPIR-V and packages both shaders. [NDK setup](https://developer.android.com/studio/projects/install-ndk) · [Android shader compilers](https://developer.android.com/ndk/guides/graphics/shader-compilers)
+The signed debug APK is at `app/build/outputs/apk/debug/app-debug.apk`. Gradle compiles and packages the texture and model shaders in `app/src/main/shaders`. [NDK setup](https://developer.android.com/studio/projects/install-ndk) · [Android shader compilers](https://developer.android.com/ndk/guides/graphics/shader-compilers)
 
 ### Vulkan validation
 
@@ -45,6 +45,12 @@ python tools/archive_probe.py $game --ooz $ooz --stage-samples > "$out/installat
 
 For archive metadata alone, use `python tools/archive_probe.py $game`. The probe opens installation files for reading. The APK packages the preview shaders and code. The game-derived `inspection.tpf` is a separate local file. It comes from Data5 BDT offset `0x3ef830` and has SHA-256 `342a3a19043f673cf4800eb002f5113ff916fd46e0444243861878791926d3bc`.
 
+## Preview a local model
+
+Press Android Back in the preview to open the asset menu. Choose **Open FLVER** and select a local little-endian Unicode Sekiro FLVER2 export. The importer also accepts the existing supported BND4 layout when it contains an uncompressed FLVER member. It previews indexed base-LOD geometry, positions, normals and UV0. The log reports the decoded model and the number of surfaces with a matching texture.
+
+Import a single-texture PC TPF containing a BC1 sRGB DDS through **Open TPF**. A mesh surface uses that texture when its diffuse reference and the TPF entry have the same basename. Other surfaces use neutral inspection lighting. **Show texture** and **Show model** switch the preview when both files are present. Support is limited to the implemented geometry layouts and first supported diffuse slot. The preview does not play animations.
+
 ## Host verification
 
 ```powershell
@@ -63,7 +69,7 @@ wsl.exe --exec "./$out/test_bnd4" "$out/inspection.bnd"
 wsl.exe --exec "./$out/test_tpf" "$out/inspection.tpf"
 ```
 
-The offscreen Vulkan test loads the shaders extracted from the APK, executes the production texture upload and draw code, and reads back every pixel. It compares both UNORM and sRGB outputs against the original decoded Data5 texels and the expected side margins.
+The offscreen Vulkan test reads back the original Data5 texture and uses a labeled FLVER fixture to check indexed geometry, mesh depth, UV/material binding and the cutout-safe viewport. It uses the production C++ draw code and shaders extracted from the APK.
 
 ```powershell
 $out = 'reverse-engineering/reports/generated'
@@ -71,18 +77,20 @@ $hostOut = "$out/host-preview"
 python -m zipfile -e 'app/build/outputs/apk/debug/app-debug.apk' $hostOut
 $headers = (wsl.exe --exec wslpath -a "$env:ANDROID_HOME/ndk/28.2.13676358/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/include").Trim()
 wsl.exe --exec g++ -std=c++20 -Wall -Wextra -Werror -Wno-missing-field-initializers `
-    -I app/src/main/cpp -idirafter $headers app/src/main/cpp/assets/tpf.cpp `
-    app/src/main/cpp/preview_texture.cpp tests/test_vulkan_preview.cpp '-l:libvulkan.so.1' `
+    -I app/src/main/cpp -idirafter $headers app/src/main/cpp/assets/tpf.cpp app/src/main/cpp/assets/flver.cpp `
+    app/src/main/cpp/preview_texture.cpp app/src/main/cpp/mesh_preview.cpp `
+    tests/test_vulkan_preview.cpp '-l:libvulkan.so.1' `
     -o "$hostOut/test_vulkan_preview"
 if ($LASTEXITCODE -ne 0) { throw 'Could not compile Vulkan host test' }
 wsl.exe --exec "$hostOut/test_vulkan_preview" "$out/inspection.tpf" `
-    "$hostOut/assets/shaders/preview.vert.spv" "$hostOut/assets/shaders/preview.frag.spv"
+    "$hostOut/assets/shaders/preview.vert.spv" "$hostOut/assets/shaders/preview.frag.spv" `
+    "$hostOut/assets/shaders/model.vert.spv" "$hostOut/assets/shaders/model.frag.spv"
 ```
 
 ## Android smoke test
 
 1. Update the APK and copy the staged `inspection.tpf` to the phone's Downloads folder.
-2. Launch the app, tap **Open TPF file**, and select the sample. The app validates the file and reloads the preview. Expect a square texture centered in landscape.
+2. Launch the app, tap **Open TPF**, and select the sample. If the previous build already imported it, the update can reuse it. Expect a square texture centered within the landscape safe area. A square texture leaves side margins on a wider screen.
 3. Background and reopen the app. Rotate to the other landscape orientation and check that the texture stays visible. An edge swipe should reveal the system bars temporarily.
 
 ```powershell
@@ -93,6 +101,6 @@ $adb = "$env:LOCALAPPDATA\Android\Sdk\platform-tools\adb.exe"
 & $adb logcat -d -s SekiroNative SekiroVulkan
 ```
 
-Look for `Loaded private inspection.tpf`, the two SPIR-V shader paths, `Uploaded 256x256 RGBA texture`, and `Vulkan queued sampled texture frame`. The last message records Vulkan accepting the presentation request. Check the screen for the visible result. If it fails, capture both log tags and any `AndroidRuntime` exception. [Android document picker](https://developer.android.com/training/data-storage/shared/documents-files)
+Look for `Window insets: status visible=false, navigation visible=false`, `Loaded private inspection.tpf` and `Vulkan queued sampled texture frame`. For a local model, look for `FLVER geometry uploaded` and `Vulkan queued indexed FLVER frame`. A queue message records Vulkan accepting the presentation request. Check the phone screen for the visible result. [Android document picker](https://developer.android.com/training/data-storage/shared/documents-files) · [Immersive mode](https://developer.android.com/develop/ui/views/layout/immersive)
 
 See [port progress](PORT_PROGRESS.md) and [the engine and archive evidence](reverse-engineering/reports/engine-evidence.md).
