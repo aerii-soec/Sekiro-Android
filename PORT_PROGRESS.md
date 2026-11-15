@@ -1,5 +1,11 @@
 # Port progress
 
+## Fullscreen follow-up
+
+- v0.3.1 requests fullscreen after the activity window attaches, regains focus, or receives control of the system bars. It checks the reported visibility once and retries with compatibility flags if needed. Android Back opens a versioned asset menu with **Retry fullscreen**.
+- The Android 15 x86-64 emulator rendered the original texture and reported both bars hidden after launch, manual retry, and background/resume. Both gesture and three-button navigation passed. v0.3.0 also hid both bars on this emulator, so the reported phone behavior was not reproduced.
+- The signed ARM64 v0.3.1 APK passed signature and 16 KiB alignment checks. Running ARM64 through the emulator's x86 translation aborted in the Vulkan debug callback bridge. The fullscreen runtime checks used the same source built for x86-64. A physical ARM64 phone retest remains open.
+
 ## Fullscreen and static model preview
 
 - The user verified v0.2.0 installation, landscape, and visible original Data5 texture on an Android phone. Status and navigation bars remained visible in that build.

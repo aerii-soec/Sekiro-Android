@@ -93,6 +93,8 @@ wsl.exe --exec "$hostOut/test_vulkan_preview" "$out/inspection.tpf" `
 2. Launch the app, tap **Open TPF**, and select the sample. If the previous build already imported it, the update can reuse it. Expect a square texture centered within the landscape safe area. A square texture leaves side margins on a wider screen.
 3. Background and reopen the app. Rotate to the other landscape orientation and check that the texture stays visible. An edge swipe should reveal the system bars temporarily.
 
+In v0.3.1, Android Back shows **Sekiro asset preview · 0.3.1**. Choose **Retry fullscreen** if a bar remains visible after the preview opens.
+
 ```powershell
 $adb = "$env:LOCALAPPDATA\Android\Sdk\platform-tools\adb.exe"
 & $adb install -r 'app/build/outputs/apk/debug/app-debug.apk'
