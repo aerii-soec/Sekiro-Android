@@ -2,9 +2,10 @@
     <uses-feature android:name="android.hardware.vulkan.version"
                   android:version="0x00400000" android:required="true" />
     <application android:label="Sekiro Native Development"
-                 android:hasCode="false" android:allowBackup="false">
-        <activity android:name="android.app.NativeActivity"
+                 android:allowBackup="false">
+        <activity android:name=".PreviewActivity"
                   android:exported="true"
+                  android:screenOrientation="sensorLandscape"
                   android:configChanges="orientation|screenSize|screenLayout|keyboardHidden"
                   android:theme="@android:style/Theme.Material.NoActionBar.Fullscreen">
             <meta-data android:name="android.app.lib_name" android:value="sekiro_native" />

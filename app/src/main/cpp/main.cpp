@@ -10,6 +10,7 @@
 #include <memory>
 #include <optional>
 #include <stdexcept>
+#include <string>
 
 namespace {
 constexpr char logTag[] = "SekiroNative";
@@ -43,8 +44,37 @@ std::vector<uint8_t> readLocalAsset(const std::filesystem::path& path) {
     return bytes;
 }
 
-void loadInspectionAssets(const char* filesDirectory, Application& state) {
+void reportIssue(ANativeActivity& activity, const char* message) {
+    JNIEnv* env = nullptr;
+    if (activity.vm->AttachCurrentThread(&env, nullptr) != JNI_OK) {
+        __android_log_write(ANDROID_LOG_ERROR, logTag, "Could not attach native thread for preview status");
+        return;
+    }
+    const jclass type = env->GetObjectClass(activity.clazz);
+    if (type) {
+        const jmethodID notify = env->GetMethodID(type, "onPreviewIssue", "(Ljava/lang/String;)V");
+        if (notify) {
+            const jstring text = env->NewStringUTF(message);
+            if (text) {
+                env->CallVoidMethod(activity.clazz, notify, text);
+                env->DeleteLocalRef(text);
+            }
+        }
+        env->DeleteLocalRef(type);
+    }
+    if (env->ExceptionCheck()) {
+        env->ExceptionDescribe();
+        env->ExceptionClear();
+    }
+    activity.vm->DetachCurrentThread();
+}
+
+void loadInspectionAssets(ANativeActivity& activity, Application& state) {
+    const char* filesDirectory = activity.internalDataPath;
+    __android_log_print(ANDROID_LOG_INFO, logTag, "Native activity started; private files directory: %s",
+                        filesDirectory ? filesDirectory : "(unavailable)");
     if (!filesDirectory) {
+        reportIssue(activity, "The Android app files directory is unavailable.");
         return;
     }
     const std::filesystem::path directory(filesDirectory);
@@ -59,22 +89,31 @@ void loadInspectionAssets(const char* filesDirectory, Application& state) {
     }
 
     try {
-        const auto texture = readLocalAsset(directory / "inspection.tpf");
-        if (!texture.empty()) {
-            state.texture = sekiro::assets::readTpfBc1(texture);
-            __android_log_print(ANDROID_LOG_INFO, logTag, "Decoded %ux%u BC1 texture",
-                                state.texture->width, state.texture->height);
+        const auto path = directory / "inspection.tpf";
+        const auto texture = readLocalAsset(path);
+        if (texture.empty()) {
+            __android_log_print(ANDROID_LOG_WARN, logTag,
+                                "No readable texture at %s; APK ships shaders without game assets", path.c_str());
+            reportIssue(activity, "Open inspection.tpf from your local Sekiro files to preview the texture.");
+            return;
         }
+        state.texture = sekiro::assets::readTpfBc1(texture);
+        __android_log_print(ANDROID_LOG_INFO, logTag, "Loaded private inspection.tpf (%zu bytes); decoded %ux%u BC1 sRGB mip 0",
+                            texture.size(), state.texture->width, state.texture->height);
     } catch (const std::exception& error) {
-        __android_log_print(ANDROID_LOG_WARN, logTag, "TPF: %s", error.what());
+        __android_log_print(ANDROID_LOG_ERROR, logTag, "TPF load failed: %s", error.what());
+        const std::string message = std::string("Could not decode inspection.tpf. ") + error.what();
+        reportIssue(activity, message.c_str());
     }
 }
+
 
 void fail(android_app& app, Application& state, const char* error) {
     __android_log_print(ANDROID_LOG_ERROR, logTag, "%s", error);
     state.renderer.reset();
     state.failed = true;
-    ANativeActivity_finish(app.activity);
+    const std::string message = std::string("Vulkan preview failed. ") + error;
+    reportIssue(*app.activity, message.c_str());
 }
 
 void onCommand(android_app* app, int32_t command) {
@@ -84,11 +123,15 @@ void onCommand(android_app* app, int32_t command) {
         case APP_CMD_INIT_WINDOW:
             if (app->window && !state.failed) {
                 state.renderer = std::make_unique<VulkanRenderer>();
-                state.renderer->initialize(app->window, state.texture ? &*state.texture : nullptr);
+                __android_log_print(ANDROID_LOG_INFO, logTag, "Native window initialized (%dx%d)",
+                                    ANativeWindow_getWidth(app->window), ANativeWindow_getHeight(app->window));
+                state.renderer->initialize(app->window, app->activity->assetManager,
+                                           state.texture ? &*state.texture : nullptr);
                 state.redraw = true;
             }
             break;
         case APP_CMD_TERM_WINDOW:
+            __android_log_write(ANDROID_LOG_INFO, logTag, "Native window terminated");
             state.renderer.reset();
             break;
         case APP_CMD_WINDOW_RESIZED:
@@ -127,7 +170,7 @@ void android_main(android_app* app) {
     Application state;
     app->userData = &state;
     app->onAppCmd = onCommand;
-    loadInspectionAssets(app->activity->internalDataPath, state);
+    loadInspectionAssets(*app->activity, state);
     while (!app->destroyRequested) {
         void* data = nullptr;
         const int events = ALooper_pollOnce(state.canDraw() ? 16 : -1, nullptr, nullptr, &data);
@@ -145,5 +188,21 @@ void android_main(android_app* app) {
                 fail(*app, state, error.what());
             }
         }
+    }
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_dev_sekiro_nativeport_PreviewActivity_validateTexture(JNIEnv* env, jclass, jstring path) {
+    const char* text = env->GetStringUTFChars(path, nullptr);
+    if (!text) {
+        return nullptr;
+    }
+    const auto release = [&](const char* value) { env->ReleaseStringUTFChars(path, value); };
+    const std::unique_ptr<const char, decltype(release)> input(text, release);
+    try {
+        (void)sekiro::assets::readTpfBc1(readLocalAsset(input.get()));
+        return nullptr;
+    } catch (const std::exception& error) {
+        return env->NewStringUTF(error.what());
     }
 }

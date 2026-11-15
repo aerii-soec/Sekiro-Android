@@ -1,7 +1,8 @@
 #pragma once
 
-#include "preview_buffer.h"
+#include "preview_texture.h"
 
+#include <android/asset_manager.h>
 #include <android/native_window.h>
 #include <vulkan/vulkan.h>
 
@@ -16,13 +17,12 @@ public:
     VulkanRenderer& operator=(const VulkanRenderer&) = delete;
     ~VulkanRenderer();
 
-    void initialize(ANativeWindow* window, const sekiro::assets::Texture* texture);
+    void initialize(ANativeWindow* window, AAssetManager* assets, const sekiro::assets::Texture* texture);
     void invalidateSwapchain() { needsSwapchain_ = true; }
     bool draw();
 
 private:
     struct FrameImage {
-        VkImage image = VK_NULL_HANDLE;
         VkImageView view = VK_NULL_HANDLE;
         VkFramebuffer framebuffer = VK_NULL_HANDLE;
         VkSemaphore rendered = VK_NULL_HANDLE;
@@ -34,9 +34,11 @@ private:
 
     ANativeWindow* window_ = nullptr;
     const sekiro::assets::Texture* texture_ = nullptr;
-    std::unique_ptr<PreviewBuffer> preview_;
+    AAssetManager* assets_ = nullptr;
+    std::unique_ptr<PreviewTexture> preview_;
 
     VkInstance instance_ = VK_NULL_HANDLE;
+    VkDebugUtilsMessengerEXT debugMessenger_ = VK_NULL_HANDLE;
     VkSurfaceKHR surface_ = VK_NULL_HANDLE;
     VkPhysicalDevice physicalDevice_ = VK_NULL_HANDLE;
     VkDevice device_ = VK_NULL_HANDLE;
